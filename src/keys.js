@@ -35,10 +35,30 @@ export async function fetchJwks({ bankServiceUrl, fetchImpl = fetch, timeoutMs =
 
   const keysByKid = new Map();
   for (const jwk of body.keys) {
-    if (!jwk || typeof jwk.kid !== 'string') continue;
+    if (!jwk || typeof jwk.kid !== 'string' || jwk.kid.length === 0) continue;
     if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') {
       // Algorithm pin: skip anything that isn't EC P-256.
       continue;
+    }
+    // v0.1.2 audit-F4: strict alg pin. The producer side advertises
+    // alg=ES256; rejecting silently-mismatched alg fields blocks a
+    // future drift where a JWKS publishes EC P-256 keys with the
+    // wrong alg header (which crypto.verify would still attempt to
+    // use, possibly with confusing results).
+    if (jwk.alg !== undefined && jwk.alg !== 'ES256') {
+      throw new Error(
+        `fetchJwks: JWKS at ${url} advertises EC P-256 key '${jwk.kid}' with alg='${jwk.alg}' (expected 'ES256'). ` +
+        `Producer drift or attacker poisoning — refusing to load this JWKS.`,
+      );
+    }
+    // v0.1.2 audit-F4: duplicate kid is fail-loud. An attacker who
+    // controls the JWKS could otherwise insert a duplicate kid with
+    // their own key, causing the Map.set to overwrite the legitimate
+    // entry. Throwing here makes the operator notice immediately.
+    if (keysByKid.has(jwk.kid)) {
+      throw new Error(
+        `fetchJwks: JWKS at ${url} contains duplicate kid '${jwk.kid}' — refusing to load (potential key-substitution attack)`,
+      );
     }
     try {
       const keyObject = crypto.createPublicKey({ key: jwk, format: 'jwk' });

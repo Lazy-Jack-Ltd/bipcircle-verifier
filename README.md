@@ -1,8 +1,8 @@
 # bipcircle-verifier
 
-Open-source verifier for the **BIPCircle public-reserve-verifier protocol v1**. Anyone can use it to prove a BIPCircle stablecoin reserve attestation PASSes or FAILs — without trusting BIPCircle or Lazy-Jack infrastructure.
+Open-source verifier for the **BIPCircle public-reserve-verifier protocol v1**. Anyone can prove a BIPCircle stablecoin reserve attestation PASSes or FAILs without trusting BIPCircle or any Lazy-Jack infrastructure.
 
-The verifier reads primary sources (the XRPL ledger, the bank-service's published JWKS, the witness file in GCS, and the on-chain token contract) and re-derives the same checks BIPCircle's anchor side runs internally. If everything matches, the daily reserve number is provably backed.
+The verifier reads primary sources (the XRPL ledger, the bank-service's published JWKS, the witness file in GCS, and the on-chain token contract) and re-derives the same checks BIPCircle's anchor side runs internally. The trust roots are **pinned in the verifier source** — not user input — so a wrong URL or social-engineered tx hash can't produce a false PASS.
 
 ## Install
 
@@ -12,15 +12,13 @@ npm install -g @lazy-jack/bipcircle-verifier
 
 Requires Node.js 20+.
 
-## Use
+## Use — pinned-tenant mode (preferred)
 
 ```bash
-bipcircle-verify \
-    --xrpl-tx <hash> \
-    --bank-service-url <https://bank-service-<tenant>.run.app>
+bipcircle-verify --xrpl-tx <hash> --tenant <tenantId>
 ```
 
-Output:
+The tenant id is looked up in the verifier's pinned `src/tenants.json` registry. Trust roots — bank-service URL, XRPL issuer account, KMS public-key fingerprint pattern, on-chain token contract — all come from the registry. Output:
 
 ```
 VERDICT: PASS
@@ -29,46 +27,56 @@ VERDICT: PASS
   sealCount: 24
   signatures: 24/24 OK
   merkle root: OK
+  reserves: 100245700 | supply: 100245700 | match: ✓
 ```
 
-Exit code `0` on PASS, `1` on FAIL, `2` on invocation error.
+The "match ✓" line is the on-chain supply comparison — reserves measured in bank-side minor units (pennies/cents) compared to the on-chain token `totalSupply()`.
 
-For machine-readable output:
+## Use — unsafe-override (ad-hoc verification of an unregistered tenant)
 
 ```bash
-bipcircle-verify --xrpl-tx <hash> --bank-service-url <url> --json
+bipcircle-verify \
+    --xrpl-tx <hash> \
+    --unsafe-bank-service-url https://bank-service-<tenant>.run.app \
+    --unsafe-issuer rExampleIssuerAccount...
 ```
 
-## What it actually checks
+For tenants not yet in the verifier's pinned registry. Operator accepts the trust-anchor responsibility — both the URL and the issuer address need to come from a trusted out-of-band source (DPA, GFSC registry, etc.). On-chain supply check is skipped in this mode (no token-contract config available).
 
-1. **XRPL transaction** — fetches the daily-attestation tx by hash via public XRPL JSON-RPC. Parses Memo 5 (`reserve-verifier-v1`).
-2. **Witness file** — fetches the witness JSON from the URL anchored in Memo 5. Computes SHA-256 of the bytes; rejects if mismatched. Validates schema.
-3. **Bank-service public keys** — fetches `/.well-known/bank-service-keys` from the per-tenant bank-service URL you supply. Builds a `kid` → public-key map.
-4. **Seal signatures** — for every seal entry in the witness, decodes the canonical input and ECDSA-verifies the signature against the matching public key.
-5. **Merkle root** — re-builds the Merkle root from the seal leaf digests and compares it to the root anchored on XRPL. Any tampering anywhere in the witness fails this check.
+Exit codes: `0` PASS, `1` FAIL, `2` invocation error. `--json` for machine-readable output.
 
-Each stage produces a structured failure record on FAIL. The `--json` output gives the full diff.
+## What the verifier actually checks
+
+1. **Registry resolution** — looks up the pinned trust roots for `--tenant` OR validates `--unsafe-*` overrides.
+2. **XRPL transaction** — fetches the tx by hash via public JSON-RPC. **Validates `tx.Account === pinned issuer`** (closes Pro F2 cross-account spoofing). Parses Memo 5 (`reserve-verifier-v1`).
+3. **Memo kid binding** — verifies the `bankServicePublicKeyId` in Memo 5 matches the tenant's pinned `kidPattern` (closes Pro F1 attacker-controlled URL).
+4. **Witness file** — HTTPS GET. Validates SHA-256 of the bytes against `witnessSha256` in Memo 5. Schema check.
+5. **Bank-service JWKS** — fetches `/.well-known/bank-service-keys` from the **pinned** bankServiceUrl. Validates every advertised `kid` matches the tenant's `kidPattern`. Rejects duplicate kids; pins `alg=ES256`.
+6. **Seal signatures** — for every seal in the witness, decodes the canonical input and ECDSA-verifies the signature against the matching public key.
+7. **Merkle root** — re-builds the Merkle root from leaf digests; compares to Memo 5's anchored root.
+8. **On-chain supply** — fetches token `totalSupply()` from the chain in the tenant registry; compares to the sum of bank-side balances. Reports "match ✓" or "shortfall of N minor units."
+
+Every stage produces a structured failure record on FAIL. `--json` gives the full diff.
 
 ## Trust model
 
 The verifier trusts only:
 
-- **The XRPL ledger** (public, decentralised, permissionless)
-- **The bank-service public keys** the operator publishes at their `/.well-known/bank-service-keys` endpoint (HSM-backed ECDSA P-256, FIPS 140-2 Level 3)
+- **This verifier's pinned tenant registry** (`src/tenants.json`, ships in the source release; operator-PR'd as tenants onboard)
+- **The XRPL ledger** (public, permissionless)
+- **The bank-service public keys** the operator publishes at the pinned `/.well-known/bank-service-keys` endpoint (HSM-backed ECDSA P-256, FIPS 140-2 Level 3)
 - **The witness file's SHA-256** anchored on the immutable XRPL transaction
-- **Node.js's built-in crypto** (the verifier uses no external cryptographic dependencies; the canonicalisation, hashing, and signature verification all use the standard library)
+- **Node.js's built-in crypto** (no external cryptographic dependencies)
 
-The verifier does **not** trust BIPCircle, Lazy-Jack, the bank-service operator, or this binary's source (you can read it, build it, and check the SLSA provenance on every release).
+The verifier does **not** trust BIPCircle, Lazy-Jack, the bank-service operator, the GCS witness host, or this binary's source (you can read it, build it, and check the npm + SLSA provenance on every release).
 
 ## Protocol
-
-The full protocol specification lives in BIPCircle:
 
   https://github.com/Lazy-Jack-Ltd/bipcircle/blob/main/Documentation/architecture/public-reserve-verifier-protocol.md
 
 Producer-side source-of-truth:
 - bank-service `sealSigner.js` (seal envelope + canonical input)
-- BIPCircle `audit.js` (`buildBankServiceSealCanonicalInput`)
+- BIPCircle `audit.js` `buildBankServiceSealCanonicalInput`
 - BIPCircle `sealMerkle.js` (Merkle root + witness file shape)
 - BIPCircle `publishTenantTreasuryAttestation.js` (XRPL Memo 5 emit)
 
@@ -76,19 +84,41 @@ Producer-side source-of-truth:
 
 Every tagged release ships with:
 
-- npm package signed via [npm provenance](https://docs.npmjs.com/generating-provenance-statements) (the build is attested by GitHub Actions on a public runner)
+- npm package signed via [npm provenance](https://docs.npmjs.com/generating-provenance-statements) (build attested by GitHub Actions OIDC on a public runner)
 - SHA-256 checksums of the tarball on the GitHub release
 - Auto-generated release notes
 
 To verify a downloaded release:
 
 ```bash
-# Check npm provenance
 npm audit signatures @lazy-jack/bipcircle-verifier
-
-# Check the tarball SHA matches the release asset
 sha256sum lazy-jack-bipcircle-verifier-*.tgz
 ```
+
+## Adding a tenant
+
+Tenants are pinned in source: every release embeds the registry available at release time. To onboard a new tenant:
+
+1. Open a PR to `src/tenants.json` adding the entry:
+
+   ```json
+   {
+     "tenantId": "your-tenant-id",
+     "bankServiceUrl": "https://bank-service-your-tenant.run.app",
+     "xrplIssuerAddress": "rYourTreasuryWalletAddress...",
+     "kidPattern": "^projects/your-gcp-project/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/your-tenant-signer/cryptoKeyVersions/\\d+$",
+     "token": {
+       "chain": "ethereum",
+       "contract": "0xYourErc20Address...",
+       "decimals": 2,
+       "currency": "GBP"
+     }
+   }
+   ```
+
+2. Cut a new verifier release (bump the patch / minor). External verifiers upgrade when ready.
+
+Until the new release lands, third parties can verify your tenant using `--unsafe-bank-service-url` + `--unsafe-issuer` overrides.
 
 ## Building from source
 
@@ -106,10 +136,15 @@ No build step — pure JavaScript, runs directly on Node.
 
 MIT — see [LICENSE](./LICENSE).
 
-## What's NOT in this binary today
+## Audit history
 
-- **On-chain token supply check.** The `src/onchain.js` module has the JSON-RPC primitives for both Ethereum ERC-20 totalSupply and XRPL issued-currency obligations, but the orchestrator in `src/index.js` doesn't yet call them. Wiring it requires per-tenant config (which contract, which chain) that hasn't yet been pinned in the witness format. Tracked as a 0.2.0 enhancement — for now the verifier proves the bank-side seals are honest; the on-chain comparison runs offline by an auditor with the witness output.
+- **v0.1.0** — initial release
+- **v0.1.1** — self-audit pass: fetch timeouts on every external call (10s/15s/30s), CLI `--key=value` form, witness `sealCount` type check
+- **v0.1.2** — Gemini Pro adversarial audit + external reviewer feedback:
+  - **F1 (CRITICAL) + F2 (CRITICAL) closed**: pinned per-tenant registry binds bank-service URL + XRPL issuer + kid pattern in the verifier source (not user input). Closes both the user-supplied-URL trust gap AND the accept-any-XRPL-account spoofing path.
+  - **F4 (MEDIUM) closed**: JWKS now rejects duplicate kids + pins `alg=ES256` strictly.
+  - **0.2.0 forward-port**: on-chain `totalSupply()` comparison wired in via tenant registry's token config. Output now reports `reserves = X | supply = Y | match ✓` or shortfall.
+  - **F7 (test coverage) closed**: 21 tests (up from 14) including F1/F2/F4 regressions + signature-forgery + duplicate-kid + unknown-tenant + wrong-XRPL-account adversarial paths.
+  - False positives documented in the commit message (nested-key canonicalisation, Merkle reorder, try/catch on crypto.verify — none were real issues; verifier doesn't re-canonicalise, witnessSha256 binds bytes, try/catch was already present).
 
-- **Reproducible build.** SLSA provenance attests the build inputs (commit SHA + workflow) but doesn't yet guarantee bit-identical output across builds. A Nix or pnpm-deterministic build is a 0.3.0 target.
-
-These limitations are documented for transparency, not as blockers — the cryptographic guarantees on the bank-service-signed seals are fully load-bearing today.
+Reproducible builds (bit-identical output) remain a 0.3.0 target.

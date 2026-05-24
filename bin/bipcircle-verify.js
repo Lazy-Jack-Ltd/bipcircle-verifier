@@ -3,36 +3,43 @@
  * bipcircle-verify — open-source CLI for the BIPCircle public-reserve-
  * verifier protocol v1.
  *
- *   bipcircle-verify --xrpl-tx <hash> --bank-service-url <url> [opts]
+ * Two modes:
  *
- * Returns:
- *   exit 0 + "VERDICT: PASS" on the happy path
- *   exit 1 + "VERDICT: FAIL" with a structured diff on failure
+ *   PINNED (preferred):
+ *     bipcircle-verify --xrpl-tx <hash> --tenant <tenantId>
  *
- * Supports --json for machine-readable output (the same structured
- * result the programmatic verify() returns).
+ *     Trust roots come from this verifier's pinned src/tenants.json.
+ *     Closes Pro audit F1+F2 (user-supplied URL / TX-from-any-account
+ *     spoofing). On-chain supply comparison wired in via tenant
+ *     registry's token config — output reports
+ *     "reserves = X, supply = Y, match ✓" or "shortfall of Z".
+ *
+ *   UNSAFE-OVERRIDE:
+ *     bipcircle-verify --xrpl-tx <hash> \
+ *         --unsafe-bank-service-url <url> --unsafe-issuer <address>
+ *
+ *     For ad-hoc verification of tenants not yet in the pinned
+ *     registry. Operator accepts the trust-anchor responsibility.
  */
 
 'use strict';
 
 import { verify } from '../src/index.js';
+import { listTenantIds } from '../src/tenantRegistry.js';
 
 function parseArgs(argv) {
-  // Self-audit (v0.1.1): support BOTH --key value AND --key=value forms.
-  // Standard CLI UX; the strict space-only form surprised early testers.
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--help' || a === '-h') { args.help = true; continue; }
     if (a === '--json') { args.json = true; continue; }
+    if (a === '--skip-onchain') { args['skip-onchain'] = true; continue; }
     if (a.startsWith('--')) {
       const body = a.slice(2);
       const eqIdx = body.indexOf('=');
       if (eqIdx >= 0) {
-        // --key=value form
         args[body.slice(0, eqIdx)] = body.slice(eqIdx + 1);
       } else {
-        // --key value form
         args[body] = argv[i + 1];
         i += 1;
       }
@@ -42,28 +49,34 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
+  let registeredIds = [];
+  try { registeredIds = listTenantIds(); } catch (e) { /* registry missing — handled in verify */ }
   process.stdout.write(`bipcircle-verify — public-reserve-verifier protocol v1
 
-USAGE:
-  bipcircle-verify --xrpl-tx <hash> --bank-service-url <url> [options]
+USAGE (pinned tenant, preferred):
+  bipcircle-verify --xrpl-tx <hash> --tenant <tenantId>
 
-REQUIRED:
-  --xrpl-tx <hash>          64-hex XRPL transaction hash for the daily
-                            treasury attestation you want to verify
-  --bank-service-url <url>  Per-tenant bank-service base URL (the
-                            verifier fetches /.well-known/bank-service-keys
-                            from here). E.g. https://bank-service-tvvin.run.app
+USAGE (unsafe override, ad-hoc):
+  bipcircle-verify --xrpl-tx <hash> \\
+      --unsafe-bank-service-url <url> --unsafe-issuer <xrpl-address>
+
+PINNED TENANTS in this build:
+  ${registeredIds.length > 0 ? registeredIds.join(', ') : '(none — registry empty; use unsafe-override mode)'}
 
 OPTIONS:
   --network <name>          "mainnet" (default) | "testnet"
   --rpc-url <url>            Override XRPL JSON-RPC endpoint
+  --eth-rpc-url <url>        Ethereum JSON-RPC for the on-chain supply
+                             stage (required when the tenant's token
+                             config is chain='ethereum')
+  --skip-onchain             Skip the on-chain supply comparison stage
   --json                     Output the full structured result as JSON
-                             (default: human-readable summary)
   -h, --help                 Show this help
 
 EXIT CODES:
   0   VERDICT: PASS
-  1   VERDICT: FAIL (or invocation error)
+  1   VERDICT: FAIL
+  2   invocation error
 
 PROTOCOL:
   https://github.com/Lazy-Jack-Ltd/bipcircle/blob/main/Documentation/architecture/public-reserve-verifier-protocol.md
@@ -78,8 +91,10 @@ async function main() {
     printHelp();
     process.exit(2);
   }
-  if (!args['bank-service-url']) {
-    process.stderr.write('error: --bank-service-url is required\n');
+  const hasTenant = Boolean(args.tenant);
+  const hasUnsafe = Boolean(args['unsafe-bank-service-url']) && Boolean(args['unsafe-issuer']);
+  if (!hasTenant && !hasUnsafe) {
+    process.stderr.write('error: either --tenant <id> OR (--unsafe-bank-service-url AND --unsafe-issuer) is required\n');
     printHelp();
     process.exit(2);
   }
@@ -88,9 +103,13 @@ async function main() {
   try {
     result = await verify({
       txHash: args['xrpl-tx'],
+      tenantId: args.tenant,
+      bankServiceUrl: args['unsafe-bank-service-url'],
+      xrplIssuerAddress: args['unsafe-issuer'],
       network: args.network || 'mainnet',
-      bankServiceUrl: args['bank-service-url'],
       rpcUrl: args['rpc-url'],
+      ethRpcUrl: args['eth-rpc-url'],
+      skipOnChainSupply: args['skip-onchain'] === true,
     });
   } catch (err) {
     process.stderr.write(`error: ${err.message}\n`);
@@ -111,6 +130,16 @@ async function main() {
     }
     if (result.stages.merkle) {
       process.stdout.write(`  merkle root: ${result.stages.merkle.ok ? 'OK' : 'MISMATCH'}\n`);
+    }
+    if (result.stages.supply && !result.stages.supply.skipped) {
+      const s = result.stages.supply;
+      if (s.ok) {
+        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | supply: ${s.onChainSupplyMinorUnits} | match: ✓\n`);
+      } else {
+        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | supply: ${s.onChainSupplyMinorUnits} | SHORTFALL: ${s.shortfallMinorUnits}\n`);
+      }
+    } else if (result.stages.supply?.skipped) {
+      process.stdout.write(`  supply check: SKIPPED (${result.stages.supply.reason})\n`);
     }
     if (result.failures.length > 0) {
       process.stdout.write(`\nFAILURES:\n`);
