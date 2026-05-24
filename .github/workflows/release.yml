@@ -1,0 +1,97 @@
+name: release
+
+# Triggers:
+#   - manual: gh workflow run release.yml
+#   - tag push: v0.1.0, v1.0.0, etc.
+#
+# Output:
+#   - GitHub Release with auto-generated notes
+#   - npm publish with SLSA-style provenance (npm provenance flag uses
+#     GitHub OIDC to sign + attest the build inputs)
+#   - SHA-256 checksums of the tarball attached to the release for
+#     consumers that vendor the source instead of installing from npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write   # for npm provenance via OIDC
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Show versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Install
+        run: npm ci || npm install
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build tarball + checksums
+        run: |
+          npm pack
+          for f in *.tgz; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
+      - name: Publish to npm (with SLSA provenance)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tgz
+            *.tgz.sha256
+          generate_release_notes: true
+          body: |
+            ## bipcircle-verifier ${{ github.ref_name }}
+
+            Open-source verifier for the BIPCircle public-reserve-verifier protocol v1.
+
+            ### Install
+
+            ```bash
+            npm install -g @lazy-jack/bipcircle-verifier
+            ```
+
+            ### Use
+
+            ```bash
+            bipcircle-verify --xrpl-tx <hash> --bank-service-url <url>
+            ```
+
+            ### Provenance
+
+            This release was built by GitHub Actions on a public runner.
+            npm provenance is attached to the published package — run
+            `npm audit signatures` to verify the build inputs.
+
+            ### Protocol
+
+            https://github.com/Lazy-Jack-Ltd/bipcircle/blob/main/Documentation/architecture/public-reserve-verifier-protocol.md

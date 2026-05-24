@@ -1,0 +1,10 @@
+node_modules
+*.tgz
+*.tgz.sha256
+.DS_Store
+.env
+.env.*
+!.env.example
+coverage
+.nyc_output
+*.log
