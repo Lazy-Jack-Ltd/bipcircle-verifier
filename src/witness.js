@@ -15,8 +15,12 @@
 import crypto from 'node:crypto';
 
 const PROTOCOL_VERSION = 'v1';
+// Self-audit (v0.1.1): bounded fetch — witness files are operator-
+// hosted but cold or rate-limited GCS responses must not hang the
+// verifier. 30s gives slack for slow regional fetches.
+const DEFAULT_FETCH_TIMEOUT_MS = 30000;
 
-export async function fetchAndValidateWitness({ witnessUrl, expectedWitnessSha256, expectedMerkleRoot, fetchImpl = fetch }) {
+export async function fetchAndValidateWitness({ witnessUrl, expectedWitnessSha256, expectedMerkleRoot, fetchImpl = fetch, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS }) {
   if (typeof witnessUrl !== 'string' || !witnessUrl.startsWith('https://')) {
     throw new Error(`fetchAndValidateWitness: witnessUrl must be https://, got '${witnessUrl}'`);
   }
@@ -27,7 +31,7 @@ export async function fetchAndValidateWitness({ witnessUrl, expectedWitnessSha25
     throw new Error(`fetchAndValidateWitness: expectedMerkleRoot must be 64-char lower-hex`);
   }
 
-  const res = await fetchImpl(witnessUrl);
+  const res = await fetchImpl(witnessUrl, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) {
     throw new Error(`fetchAndValidateWitness: HTTP ${res.status} from ${witnessUrl}`);
   }
@@ -58,6 +62,9 @@ export async function fetchAndValidateWitness({ witnessUrl, expectedWitnessSha25
   }
   if (!Array.isArray(witness.seals) || witness.seals.length === 0) {
     throw new Error('WITNESS_SCHEMA: seals[] must be a non-empty array');
+  }
+  if (typeof witness.sealCount !== 'number' || !Number.isInteger(witness.sealCount) || witness.sealCount < 1) {
+    throw new Error(`WITNESS_SCHEMA: sealCount must be a positive integer, got ${JSON.stringify(witness.sealCount)}`);
   }
   if (witness.seals.length !== witness.sealCount) {
     throw new Error(`WITNESS_SCHEMA: sealCount (${witness.sealCount}) does not match seals.length (${witness.seals.length})`);

@@ -14,12 +14,17 @@
 
 import crypto from 'node:crypto';
 
-export async function fetchJwks({ bankServiceUrl, fetchImpl = fetch }) {
+// Self-audit (v0.1.1): bounded fetch — bank-service /.well-known should
+// respond in well under a second; 10s timeout catches a dead endpoint
+// without dragging out the verifier.
+const DEFAULT_FETCH_TIMEOUT_MS = 10000;
+
+export async function fetchJwks({ bankServiceUrl, fetchImpl = fetch, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS }) {
   if (typeof bankServiceUrl !== 'string' || !bankServiceUrl.startsWith('https://')) {
     throw new Error(`fetchJwks: bankServiceUrl must be https://, got '${bankServiceUrl}'`);
   }
   const url = `${bankServiceUrl.replace(/\/$/, '')}/.well-known/bank-service-keys`;
-  const res = await fetchImpl(url);
+  const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) {
     throw new Error(`fetchJwks: HTTP ${res.status} from ${url}`);
   }

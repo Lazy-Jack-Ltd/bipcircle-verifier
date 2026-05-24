@@ -15,6 +15,11 @@ const DEFAULT_RPC_URLS = {
   testnet: 'https://s.altnet.rippletest.net:51234/',
 };
 
+// Self-audit (v0.1.1): every external fetch needs a timeout. A slow or
+// hung RPC endpoint must not block the verifier indefinitely. 15s is
+// generous for a single XRPL tx lookup; --rpc-timeout flag can override.
+const DEFAULT_FETCH_TIMEOUT_MS = 15000;
+
 const MEMO_TYPE_VERIFIER = 'reserve-verifier-v1';
 const MEMO_TYPE_CANONICAL = 'treasury-attestation-v1';
 
@@ -33,7 +38,7 @@ function hexToUtf8(hex) {
  * @returns {Promise<{ verifierMemo: Object, canonicalRecord: string,
  *                     ledgerIndex: number, account: string }>}
  */
-export async function fetchAttestationTx({ txHash, network = 'mainnet', rpcUrl, fetchImpl = fetch }) {
+export async function fetchAttestationTx({ txHash, network = 'mainnet', rpcUrl, fetchImpl = fetch, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS }) {
   if (typeof txHash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txHash)) {
     throw new Error(`fetchAttestationTx: txHash must be 64 hex chars, got '${txHash}'`);
   }
@@ -48,6 +53,7 @@ export async function fetchAttestationTx({ txHash, network = 'mainnet', rpcUrl, 
       method: 'tx',
       params: [{ transaction: txHash, binary: false }],
     }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     throw new Error(`fetchAttestationTx: XRPL RPC HTTP ${res.status} from ${url}`);

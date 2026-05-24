@@ -18,16 +18,24 @@
 import { verify } from '../src/index.js';
 
 function parseArgs(argv) {
+  // Self-audit (v0.1.1): support BOTH --key value AND --key=value forms.
+  // Standard CLI UX; the strict space-only form surprised early testers.
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--help' || a === '-h') { args.help = true; continue; }
     if (a === '--json') { args.json = true; continue; }
     if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const val = argv[i + 1];
-      args[key] = val;
-      i += 1;
+      const body = a.slice(2);
+      const eqIdx = body.indexOf('=');
+      if (eqIdx >= 0) {
+        // --key=value form
+        args[body.slice(0, eqIdx)] = body.slice(eqIdx + 1);
+      } else {
+        // --key value form
+        args[body] = argv[i + 1];
+        i += 1;
+      }
     }
   }
   return args;
