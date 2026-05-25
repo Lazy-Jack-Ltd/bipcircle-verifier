@@ -24,8 +24,43 @@
 
 'use strict';
 
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { platform } from 'node:os';
 import { verify } from '../src/index.js';
 import { listTenantIds } from '../src/tenantRegistry.js';
+
+function explorerUrl(txHash, network) {
+  // Official XRPL Foundation explorers — sibling subdomains, same UI.
+  // testnet.xrpl.org is the canonical test-network explorer; livenet.xrpl.org
+  // is the mainnet one. No third-party trust required.
+  const host = network === 'testnet' ? 'testnet.xrpl.org' : 'livenet.xrpl.org';
+  return `https://${host}/transactions/${txHash}`;
+}
+
+function openInBrowser(url) {
+  const p = platform();
+  const cmd = p === 'darwin' ? 'open' : p === 'win32' ? 'start' : 'xdg-open';
+  try {
+    spawn(cmd, [url], { detached: true, stdio: 'ignore' }).unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function promptOpen(url) {
+  // No-op in non-TTY contexts (CI, pipes) — print URL and return.
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  await new Promise((resolve) => {
+    rl.question('Press Enter to open in browser (or Ctrl+C to skip)... ', () => {
+      rl.close();
+      openInBrowser(url);
+      resolve();
+    });
+  });
+}
 
 function parseArgs(argv) {
   const args = {};
@@ -70,6 +105,7 @@ OPTIONS:
                              stage (required when the tenant's token
                              config is chain='ethereum')
   --skip-onchain             Skip the on-chain supply comparison stage
+  --no-open                  Don't prompt to open the XRPL explorer
   --json                     Output the full structured result as JSON
   -h, --help                 Show this help
 
@@ -146,6 +182,12 @@ async function main() {
       for (const f of result.failures) {
         process.stdout.write(`  [${f.stage}] ${f.reason}\n`);
       }
+    }
+
+    const url = explorerUrl(args['xrpl-tx'], args.network || 'mainnet');
+    process.stdout.write(`\nView on XRPL: ${url}\n`);
+    if (args['no-open'] !== true) {
+      await promptOpen(url);
     }
   }
 

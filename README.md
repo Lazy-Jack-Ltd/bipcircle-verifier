@@ -7,7 +7,7 @@ The verifier reads primary sources (the XRPL ledger, the bank-service's publishe
 ## Install
 
 ```bash
-npm install -g @lazy-jack/bipcircle-verifier
+npm install -g @lazyjackorg/bipcircle-verifier
 ```
 
 Requires Node.js 20+.
@@ -43,7 +43,13 @@ bipcircle-verify \
 
 For tenants not yet in the verifier's pinned registry. Operator accepts the trust-anchor responsibility — both the URL and the issuer address need to come from a trusted out-of-band source (DPA, GFSC registry, etc.). On-chain supply check is skipped in this mode (no token-contract config available).
 
-Exit codes: `0` PASS, `1` FAIL, `2` invocation error. `--json` for machine-readable output.
+## After PASS — inspect the underlying XRPL transaction
+
+Every successful run prints a `View on XRPL:` line linking to the official XRPL Foundation explorer for the network you specified — `testnet.xrpl.org` or `livenet.xrpl.org`. On an interactive terminal the CLI offers a press-Enter prompt that opens the URL in your operating system's default browser. Pass `--no-open` to suppress the prompt (useful in CI or scripted contexts; the URL is still printed for the log).
+
+The explorer page lets you independently confirm the tx's `Account`, `Memos`, `Sequence`, and ledger-validation state without any platform infrastructure in the loop — useful as a cross-check that the verifier and the XRPL ledger agree.
+
+Exit codes: `0` PASS, `1` FAIL, `2` invocation error. `--json` for machine-readable output (suppresses the explorer prompt regardless of `--no-open`).
 
 ## What the verifier actually checks
 
@@ -91,7 +97,7 @@ Every tagged release ships with:
 To verify a downloaded release:
 
 ```bash
-npm audit signatures @lazy-jack/bipcircle-verifier
+npm audit signatures @lazyjackorg/bipcircle-verifier
 sha256sum lazy-jack-bipcircle-verifier-*.tgz
 ```
 
@@ -146,5 +152,8 @@ MIT — see [LICENSE](./LICENSE).
   - **0.2.0 forward-port**: on-chain `totalSupply()` comparison wired in via tenant registry's token config. Output now reports `reserves = X | supply = Y | match ✓` or shortfall.
   - **F7 (test coverage) closed**: 21 tests (up from 14) including F1/F2/F4 regressions + signature-forgery + duplicate-kid + unknown-tenant + wrong-XRPL-account adversarial paths.
   - False positives documented in the commit message (nested-key canonicalisation, Merkle reorder, try/catch on crypto.verify — none were real issues; verifier doesn't re-canonicalise, witnessSha256 binds bytes, try/catch was already present).
+- **v0.1.3** — first pinned tenant + XRPL explorer UX:
+  - **`tvvin` tenant pinned in `src/tenants.json`** — the testnet Sepolia ERC-3643 stablecoin issuer at `0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4`, XRPL issuer `rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4`, bank-service URL `https://bank-service-tvvin-yrikeqyelq-nw.a.run.app`. First end-to-end verification against this tenant landed PASS on tx `7753CF92C7C017D2C9C721F1A72F3BEA55030DD655D6377E7750C757FB711E57`.
+  - **XRPL explorer URL in the CLI output** — every successful run now prints `View on XRPL: https://testnet.xrpl.org/transactions/<hash>` (mainnet: `livenet.xrpl.org`). On an interactive TTY the CLI also offers a press-Enter prompt to launch the URL in the operating system's default browser. Add `--no-open` to suppress the prompt for CI / scripted contexts.
 
 Reproducible builds (bit-identical output) remain a 0.3.0 target.

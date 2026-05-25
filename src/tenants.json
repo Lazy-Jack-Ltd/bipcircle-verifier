@@ -2,7 +2,20 @@
   "_meta": {
     "description": "Pinned per-tenant trust roots for the bipcircle-verifier. Each tenant entry binds the verifier to a specific bank-service URL, XRPL issuer account, KMS public key (by kid pattern), and token contract — eliminating the user-supplied-URL trust gap (Pro audit F1+F2). Updates happen via verifier source releases: a tenant onboarding flips on v2 seals → operator opens a PR to this file → new verifier version cuts → npm publish. Verifiers in the field upgrade when a new tenant comes online.",
     "schemaVersion": "v1",
-    "lastUpdated": "2026-05-24"
+    "lastUpdated": "2026-05-25"
   },
-  "tenants": []
+  "tenants": [
+    {
+      "tenantId": "tvvin",
+      "bankServiceUrl": "https://bank-service-tvvin-yrikeqyelq-nw.a.run.app",
+      "xrplIssuerAddress": "rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4",
+      "kidPattern": "^projects/bipcircle/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/tvvin-signer/cryptoKeyVersions/\\d+$",
+      "token": {
+        "chain": "ethereum",
+        "contract": "0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4",
+        "decimals": 18,
+        "currency": "GBP"
+      }
+    }
+  ]
 }
