@@ -168,7 +168,7 @@ sha256sum lazy-jack-bipcircle-verifier-*.tgz
 
 Tenants are pinned in source: every release embeds the registry available at release time. To onboard a new tenant:
 
-1. Open a PR to `src/tenants.json` adding the entry:
+1. Open a PR to `src/tenants.json` adding the entry. A tenant may hold stablecoin products on multiple chains; list each under `tokens[]`:
 
    ```json
    {
@@ -176,14 +176,28 @@ Tenants are pinned in source: every release embeds the registry available at rel
      "bankServiceUrl": "https://bank-service-your-tenant.run.app",
      "xrplIssuerAddress": "rYourTreasuryWalletAddress...",
      "kidPattern": "^projects/your-gcp-project/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/your-tenant-signer/cryptoKeyVersions/\\d+$",
-     "token": {
-       "chain": "ethereum",
-       "contract": "0xYourErc20Address...",
-       "decimals": 2,
-       "currency": "GBP"
-     }
+     "tokens": [
+       {
+         "label": "MyStable-ETH-Sepolia",
+         "chain": "ethereum",
+         "contract": "0xYourErc20Address...",
+         "decimals": 18,
+         "currency": "GBP"
+       },
+       {
+         "label": "MyStable-XRPL-Testnet",
+         "chain": "xrpl",
+         "issuer": "rYourXrplIssuerAddress...",
+         "currency": "MST",
+         "decimals": 0
+       }
+     ]
    }
    ```
+
+   The verifier checks every token's on-chain supply and compares the SUM against the bank-side reserves. Per-token supplies are reported individually so a reviewer can see which chain contributes how much of the liability.
+
+   The older `token` (single object) shape is still accepted on read for back-compat. New entries should use `tokens[]`.
 
 2. Cut a new verifier release (bump the patch or minor). External verifiers upgrade when ready.
 
