@@ -38,11 +38,22 @@ export function loadTenantRegistry() {
   if (!parsed || !Array.isArray(parsed.tenants)) {
     throw new Error(`tenantRegistry: malformed tenants.json at ${REGISTRY_PATH} — missing tenants[] array`);
   }
-  // Build kid pattern regexes once.
-  const tenants = parsed.tenants.map((t) => ({
-    ...t,
-    _kidRegex: t.kidPattern ? new RegExp(t.kidPattern) : null,
-  }));
+  // Build kid pattern regexes once + normalise single-token entries
+  // into the `tokens` array shape used internally. Older registry
+  // entries used `token` (object). New entries use `tokens` (array)
+  // so a single tenant can hold multiple stablecoin products across
+  // ethereum + xrpl. Both shapes are accepted on read; new entries
+  // should use `tokens`.
+  const tenants = parsed.tenants.map((t) => {
+    const normalisedTokens = Array.isArray(t.tokens)
+      ? t.tokens
+      : (t.token ? [t.token] : []);
+    return {
+      ...t,
+      _kidRegex: t.kidPattern ? new RegExp(t.kidPattern) : null,
+      tokens: normalisedTokens,
+    };
+  });
   cached = { tenants, byId: new Map(tenants.map((t) => [t.tenantId, t])) };
   return cached;
 }
@@ -71,9 +82,15 @@ export function _setForTests(payload) {
   if (!payload || !Array.isArray(payload.tenants)) {
     throw new Error('_setForTests: payload must have tenants[]');
   }
-  const tenants = payload.tenants.map((t) => ({
-    ...t,
-    _kidRegex: t.kidPattern ? new RegExp(t.kidPattern) : null,
-  }));
+  const tenants = payload.tenants.map((t) => {
+    const normalisedTokens = Array.isArray(t.tokens)
+      ? t.tokens
+      : (t.token ? [t.token] : []);
+    return {
+      ...t,
+      _kidRegex: t.kidPattern ? new RegExp(t.kidPattern) : null,
+      tokens: normalisedTokens,
+    };
+  });
   cached = { tenants, byId: new Map(tenants.map((t) => [t.tenantId, t])) };
 }

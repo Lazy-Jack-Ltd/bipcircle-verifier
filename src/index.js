@@ -83,10 +83,13 @@ export async function verify({
       bankServiceUrl: t.bankServiceUrl,
       xrplIssuerAddress: t.xrplIssuerAddress,
       kidRegex: t._kidRegex,
-      token: t.token || null,
+      // v2 registry shape: tokens[] (multi-chain). tenantRegistry.js
+      // back-compat-maps the old single `token` to a 1-element array
+      // so reads here always see an array.
+      tokens: Array.isArray(t.tokens) ? t.tokens : [],
     };
     result.mode = 'registered-tenant';
-    result.stages.registry = { ok: true, tenantId, source: 'pinned' };
+    result.stages.registry = { ok: true, tenantId, source: 'pinned', tokenCount: trustRoots.tokens.length };
   } else {
     if (!unsafeBankServiceUrl || !unsafeIssuer) {
       result.failures.push({
@@ -100,10 +103,10 @@ export async function verify({
       bankServiceUrl: unsafeBankServiceUrl,
       xrplIssuerAddress: unsafeIssuer,
       kidRegex: null,
-      token: null,
+      tokens: [],
     };
     result.mode = 'unsafe-override';
-    result.stages.registry = { ok: true, source: 'unsafe-override' };
+    result.stages.registry = { ok: true, source: 'unsafe-override', tokenCount: 0 };
   }
 
   // Stage 1: XRPL tx + Memo 5 + Account binding
@@ -218,54 +221,100 @@ export async function verify({
     });
   }
 
-  // Stage 6: on-chain supply comparison (v0.1.2 wires in 0.2.0 primitive)
-  if (!skipOnChainSupply && trustRoots.token) {
+  // Stage 6: on-chain supply comparison — multi-token aware.
+  //
+  // For tenants with multiple tokens across chains (e.g. tvvin holding
+  // both ETH-TVV and XRPL-TVV against the same GBP bank reserves) the
+  // verifier sums the on-chain supplies across all configured tokens
+  // and compares the total against the reserves. The reserves stay
+  // single-currency on the bank side (one GBP holding account); the
+  // liability is split across products.
+  //
+  // Per-token supplies are reported individually under
+  // result.stages.supply.perToken[] so a reviewer can see which chain
+  // contributes how much of the liability.
+  if (!skipOnChainSupply && trustRoots.tokens.length > 0) {
     try {
-      const reservesMinor = sumBankReserves(witness.seals, trustRoots.token.decimals);
-      let supplyMinor;
-      if (trustRoots.token.chain === 'ethereum') {
-        if (!ethRpcUrl) {
-          throw new Error('ethRpcUrl required for ethereum-chain on-chain check (pass --eth-rpc-url)');
+      // Reserves: use decimals from the first ethereum token if present
+      // (T-REX 18-dec default), else from the first token. Bank reserves
+      // are denominated in the fiat currency, scaled to minor units.
+      const baseDecimals = trustRoots.tokens.find((t) => t.chain === 'ethereum')?.decimals
+        ?? trustRoots.tokens[0]?.decimals
+        ?? 2;
+      const reservesMinor = sumBankReserves(witness.seals, baseDecimals);
+
+      const perToken = [];
+      let totalSupplyMinor = 0n;
+      for (const tok of trustRoots.tokens) {
+        let supplyMinor;
+        if (tok.chain === 'ethereum') {
+          if (!ethRpcUrl) {
+            throw new Error('ethRpcUrl required for ethereum-chain on-chain check (pass --eth-rpc-url)');
+          }
+          supplyMinor = await getEthereumErc20TotalSupply({
+            rpcUrl: ethRpcUrl,
+            contractAddress: tok.contract,
+            fetchImpl,
+          });
+        } else if (tok.chain === 'xrpl') {
+          const xrplRpc = rpcUrl || (network === 'mainnet'
+            ? 'https://s1.ripple.com:51234/'
+            : 'https://s.altnet.rippletest.net:51234/');
+          const supplyStr = await getXrplIssuedSupply({
+            rpcUrl: xrplRpc,
+            issuerAddress: tok.issuer,
+            currencyCode: tok.currency,
+            fetchImpl,
+          });
+          supplyMinor = decimalStringToMinorUnits(supplyStr, tok.decimals);
+        } else {
+          throw new Error(`unknown chain '${tok.chain}' in tenant registry`);
         }
-        supplyMinor = await getEthereumErc20TotalSupply({
-          rpcUrl: ethRpcUrl,
-          contractAddress: trustRoots.token.contract,
-          fetchImpl,
+        // Rebase per-token supply to the common reserves decimals so
+        // sums are like-for-like. Eth 18-dec stays as is when base is
+        // 18; XRPL 0-dec gets multiplied up.
+        const rebased = tok.decimals === baseDecimals
+          ? supplyMinor
+          : supplyMinor * (10n ** BigInt(baseDecimals - tok.decimals));
+        perToken.push({
+          label: tok.label || `${tok.currency}-${tok.chain}`,
+          chain: tok.chain,
+          currency: tok.currency,
+          supplyMinor: supplyMinor.toString(),
+          rebasedToReservesMinor: rebased.toString(),
         });
-      } else if (trustRoots.token.chain === 'xrpl') {
-        const xrplRpc = rpcUrl || (network === 'mainnet'
-          ? 'https://s1.ripple.com:51234/'
-          : 'https://s.altnet.rippletest.net:51234/');
-        const supplyStr = await getXrplIssuedSupply({
-          rpcUrl: xrplRpc,
-          issuerAddress: trustRoots.token.issuer,
-          currencyCode: trustRoots.token.currency,
-          fetchImpl,
-        });
-        supplyMinor = decimalStringToMinorUnits(supplyStr, trustRoots.token.decimals);
-      } else {
-        throw new Error(`unknown chain '${trustRoots.token.chain}' in tenant registry`);
+        totalSupplyMinor += rebased;
       }
-      const tolerance = trustRoots.token.toleranceMinorUnits
-        ? BigInt(trustRoots.token.toleranceMinorUnits)
+
+      const tolerance = trustRoots.tokens.find((t) => t.toleranceMinorUnits)
+        ? BigInt(trustRoots.tokens.find((t) => t.toleranceMinorUnits).toleranceMinorUnits)
         : 0n;
       const cmp = compareReservesVsSupply({
         reservesMinorUnits: reservesMinor,
-        onChainSupplyMinorUnits: supplyMinor,
+        onChainSupplyMinorUnits: totalSupplyMinor,
         toleranceMinorUnits: tolerance,
       });
-      result.stages.supply = { ok: cmp.ok, ...cmp, chain: trustRoots.token.chain };
+      result.stages.supply = {
+        ok: cmp.ok,
+        ...cmp,
+        perToken,
+        tokenCount: trustRoots.tokens.length,
+      };
       if (!cmp.ok) {
         result.failures.push({
           stage: 'supply',
-          reason: `RESERVE_SHORTFALL: reserves=${cmp.reservesMinorUnits} < supply=${cmp.onChainSupplyMinorUnits} (shortfall=${cmp.shortfallMinorUnits} minor units)`,
+          reason: `RESERVE_SHORTFALL: reserves=${cmp.reservesMinorUnits} < total on-chain supply=${cmp.onChainSupplyMinorUnits} across ${trustRoots.tokens.length} tokens (shortfall=${cmp.shortfallMinorUnits} minor units)`,
         });
       }
     } catch (err) {
       result.failures.push({ stage: 'supply', reason: err.message });
     }
-  } else if (skipOnChainSupply || !trustRoots.token) {
-    result.stages.supply = { ok: null, skipped: true, reason: skipOnChainSupply ? 'flag' : 'no token config in registry / unsafe-override mode' };
+  } else if (skipOnChainSupply || trustRoots.tokens.length === 0) {
+    result.stages.supply = {
+      ok: null,
+      skipped: true,
+      reason: skipOnChainSupply ? 'flag' : 'no tokens configured for tenant (or unsafe-override mode)',
+    };
   }
 
   result.verdict = result.failures.length === 0 ? 'PASS' : 'FAIL';
