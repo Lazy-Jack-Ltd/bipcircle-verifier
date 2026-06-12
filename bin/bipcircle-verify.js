@@ -169,10 +169,16 @@ async function main() {
     }
     if (result.stages.supply && !result.stages.supply.skipped) {
       const s = result.stages.supply;
+      const tokenCount = s.tokenCount ?? (s.perToken ? s.perToken.length : 1);
       if (s.ok) {
-        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | supply: ${s.onChainSupplyMinorUnits} | match: ✓\n`);
+        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | total supply (${tokenCount} token${tokenCount === 1 ? '' : 's'}): ${s.onChainSupplyMinorUnits} | match: ✓\n`);
       } else {
-        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | supply: ${s.onChainSupplyMinorUnits} | SHORTFALL: ${s.shortfallMinorUnits}\n`);
+        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | total supply (${tokenCount} token${tokenCount === 1 ? '' : 's'}): ${s.onChainSupplyMinorUnits} | SHORTFALL: ${s.shortfallMinorUnits}\n`);
+      }
+      if (s.perToken && s.perToken.length > 0) {
+        for (const t of s.perToken) {
+          process.stdout.write(`    [${t.chain}] ${t.label || t.currency}: ${t.supplyMinor}\n`);
+        }
       }
     } else if (result.stages.supply?.skipped) {
       process.stdout.write(`  supply check: SKIPPED (${result.stages.supply.reason})\n`);

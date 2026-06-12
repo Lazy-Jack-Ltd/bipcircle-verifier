@@ -1,6 +1,6 @@
 {
   "name": "@lazyjackorg/bipcircle-verifier",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Open-source verifier for BIPCircle stablecoin reserve attestations. Re-derives PASS/FAIL from primary sources (XRPL, bank-service JWKS, on-chain token supply) without trusting BIPCircle or Lazy-Jack infrastructure.",
   "type": "module",
   "license": "MIT",

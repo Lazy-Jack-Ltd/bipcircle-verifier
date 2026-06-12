@@ -1,8 +1,9 @@
 {
   "_meta": {
-    "description": "Pinned per-tenant trust roots for the bipcircle-verifier. Each tenant entry binds the verifier to a specific bank-service URL, XRPL issuer account, KMS public key (by kid pattern), and token contract — eliminating the user-supplied-URL trust gap (Pro audit F1+F2). Updates happen via verifier source releases: a tenant onboarding flips on v2 seals → operator opens a PR to this file → new verifier version cuts → npm publish. Verifiers in the field upgrade when a new tenant comes online.",
-    "schemaVersion": "v1",
-    "lastUpdated": "2026-05-25"
+    "description": "Pinned per-tenant trust roots for the bipcircle-verifier. Each tenant entry binds the verifier to a specific bank-service URL, XRPL issuer account (for the daily attestation tx), KMS public key (by kid pattern), and one or more tokens (per chain). Eliminates the user-supplied-URL trust gap (Pro audit F1+F2). Updates happen via verifier source releases: a tenant onboards or extends to a new chain, the operator opens a PR to this file, a new verifier version cuts, npm publish, verifiers in the field upgrade when the new tenant comes online.",
+    "schemaVersion": "v2",
+    "lastUpdated": "2026-06-08",
+    "schemaNotes": "v2 introduces tokens[] (array) so a single tenant can hold stablecoin products on multiple chains. v1 used `token` (object); v1 entries still read by the registry loader (back-compat), but new entries should use `tokens[]`."
   },
   "tenants": [
     {
@@ -10,12 +11,22 @@
       "bankServiceUrl": "https://bank-service-tvvin-yrikeqyelq-nw.a.run.app",
       "xrplIssuerAddress": "rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4",
       "kidPattern": "^projects/bipcircle/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/tvvin-signer/cryptoKeyVersions/\\d+$",
-      "token": {
-        "chain": "ethereum",
-        "contract": "0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4",
-        "decimals": 18,
-        "currency": "GBP"
-      }
+      "tokens": [
+        {
+          "label": "TVETH-Sepolia",
+          "chain": "ethereum",
+          "contract": "0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE",
+          "decimals": 18,
+          "currency": "GBP"
+        },
+        {
+          "label": "TVV-XRPL-Testnet",
+          "chain": "xrpl",
+          "issuer": "rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34",
+          "currency": "TVV",
+          "decimals": 2
+        }
+      ]
     }
   ]
 }
