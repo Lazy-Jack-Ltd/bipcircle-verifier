@@ -234,3 +234,13 @@ MIT — see [LICENSE](./LICENSE).
   - **XRPL explorer URL in the CLI output** — every successful run now prints `View on XRPL: https://testnet.xrpl.org/transactions/<hash>` (mainnet: `livenet.xrpl.org`). On an interactive TTY the CLI also offers a press-Enter prompt to launch the URL in the operating system's default browser. Add `--no-open` to suppress the prompt for CI or scripted contexts.
 
 Reproducible builds (bit-identical output) remain a 0.3.0 target.
+
+## Lazy-Jack sister projects (cross-announcement)
+
+- **agentbip-verifier** — Lazy-Jack Ltd also operates the **AgentBip research-record anchor chain**
+  on XRPL **mainnet**. Officially announced anchor account, pre-pinned in that verifier's source
+  BEFORE its genesis transaction (commit-before-outcome):
+  **`rwdFhg97kMBisKCYcP7fuah4vYsYJdJhKP`** (genesis tx
+  `4B077F8B1E1C753E9E4BAC250DEEC09BC5D567CDECC851C20A8031B83AA9DCB5`, 2026-06-12).
+  Any other account claiming to be the AgentBip anchor is NOT ours.
+  Verify independently: https://github.com/Lazy-Jack-Ltd/agentbip-verifier
