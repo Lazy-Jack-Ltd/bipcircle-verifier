@@ -76,6 +76,11 @@ describe('renderHuman', () => {
     assert.match(out, /issuer \(balance\):\s+https:\/\/testnet\.xrpl\.org\/accounts\/rUQ1ASSoETT3ujFH2N469Nfi1BKW4xDFTf/);
   });
 
+  test('links the hosted web verifier (shareable treasury URL)', () => {
+    const out = renderHuman(result, { network: 'testnet' });
+    assert.match(out, /web verifier:\s+https:\/\/lazy-jack-ltd\.github\.io\/bipcircle-verifier\//);
+  });
+
   test('still shows balance section when skipped is flagged', () => {
     const skipped = { verdict: 'PASS', stages: { xrpl: { txHash: 'X', account: 'rA' }, supply: { skipped: true, reason: 'on-chain check skipped' } }, failures: [] };
     const out = renderHuman(skipped, { network: 'testnet' });

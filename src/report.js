@@ -10,6 +10,10 @@
  * to the attestation tx and the reserve/supply figures in raw minor units.
  */
 
+// Hosted browser verifier (GitHub Pages) — reads the live on-chain treasury balance + links to the
+// XRP Ledger. Shareable URL for a regulator/holder who doesn't want to run the CLI.
+export const WEB_VERIFIER_URL = 'https://lazy-jack-ltd.github.io/bipcircle-verifier/';
+
 // Official XRPL Foundation explorers (no third-party trust required).
 const XRPL_HOST = { mainnet: 'livenet.xrpl.org', testnet: 'testnet.xrpl.org' };
 const CURRENCY_SYMBOL = { GBP: '£', USD: '$', EUR: '€', JPY: '¥' };
@@ -107,6 +111,7 @@ export function renderHuman(result, { network = 'mainnet', txHash } = {}) {
       L.push(`  ${t.label} token:        ${ethTokenUrl(t.contract, t.label)}`);
     }
   }
+  L.push(`  web verifier:          ${WEB_VERIFIER_URL}`);
 
   return `${L.join('\n')}\n`;
 }

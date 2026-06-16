@@ -1,0 +1,151 @@
+<!doctype html>
+<!-- bipcircle-verify (web) — companion to the CLI (@lazyjackorg/bipcircle-verifier). Shows the LIVE
+     on-chain treasury balance for a pinned tenant + clickable XRPL account/tx links, read straight
+     from the XRP Ledger in your browser. The full cryptographic reserves-vs-bank check (witness +
+     JWKS + Merkle) needs the bank service and lives in the CLI — linked below. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BIPCircle stablecoin treasury verifier — on-chain reserves</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a2e; }
+  h1 { font-size: 1.4rem; } .sub { color: #555; margin-top: -0.6rem; }
+  button { font-size: 1.05rem; padding: .6rem 1.4rem; border-radius: 8px; border: 0; background: #1a56db; color: #fff; cursor: pointer; }
+  button:disabled { background: #999; }
+  select { font-size: 1rem; padding: .4rem; border-radius: 6px; }
+  .stage { font-family: ui-monospace, monospace; padding: .15rem 0; }
+  .ok::before { content: "✅ "; } .fail::before { content: "❌ "; } .info::before { content: "🔗 "; }
+  #balance { font-size: 1.25rem; font-weight: 700; margin: 1rem 0 .3rem; }
+  .pin { font-family: ui-monospace, monospace; font-size: .85rem; background: #f3f4f6; padding: .6rem .8rem; border-radius: 8px; word-break: break-all; }
+  .links a { display: block; margin: .2rem 0; }
+  .caveat { background: #fdf6b2; border-radius: 8px; padding: .8rem 1rem; font-size: .92rem; margin-top: 1rem; }
+  a { color: #1a56db; }
+</style>
+</head>
+<body>
+<h1>BIPCircle stablecoin treasury verifier</h1>
+<p class="sub">Reads the <b>live on-chain treasury balance</b> for a BIPCircle stablecoin straight from the XRP Ledger — no login, no trust in BIPCircle's servers. Trust roots are pinned in this page's source (and in the <a href="https://github.com/Lazy-Jack-Ltd/bipcircle-verifier">open-source verifier</a>).</p>
+
+<p>Tenant: <select id="tenant"></select> &nbsp; <button id="run">Read the treasury on-chain</button></p>
+
+<div id="pin" class="pin"></div>
+<div id="balance"></div>
+<div id="stages"></div>
+<div id="links" class="links"></div>
+
+<div class="caveat">This page shows the <b>live on-chain issued supply</b> (the treasury's liability) and links you to the raw XRP Ledger so you can see it yourself. It does <b>not</b> by itself prove reserves ≥ supply — the full cryptographic check (signed bank-witness reserves vs on-chain supply, Merkle + ES256) needs the bank-service feed and runs in the CLI:
+<br><code>npm i -g @lazyjackorg/bipcircle-verifier &amp;&amp; bipcircle-verify --xrpl-tx &lt;hash&gt; --tenant &lt;id&gt; --network &lt;net&gt;</code></div>
+
+<p class="sub" style="margin-top:1rem">Sister project: <a href="https://github.com/Lazy-Jack-Ltd/agentbip-verifier">agentbip-verifier</a> (research-record anchor chain). Source: <a href="https://github.com/Lazy-Jack-Ltd/bipcircle-verifier">bipcircle-verifier</a>.</p>
+
+<script>
+// Pinned trust roots — mirrors src/tenants.json. A wrong address here can't produce a false reading
+// because everything links back to the public ledger for you to confirm.
+const TENANTS = {
+  tvvin: {
+    network: 'testnet',
+    attestationAccount: 'rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4', // publishes the daily reserve attestation tx
+    tokens: [
+      { label: 'TVV-XRPL-Testnet', chain: 'xrpl', issuer: 'rUQ1ASSoETT3ujFH2N469Nfi1BKW4xDFTf', currency: 'TVV', decimals: 0 },
+      { label: 'TVV-ETH-Sepolia', chain: 'ethereum', contract: '0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4', currency: 'GBP', decimals: 18 },
+    ],
+  },
+};
+const XRPL_RPC = { mainnet: 'https://xrplcluster.com', testnet: 'https://s.altnet.rippletest.net:51234/' };
+const XRPL_EXPLORER = { mainnet: 'https://livenet.xrpl.org', testnet: 'https://testnet.xrpl.org' };
+const ETH_RPC = { mainnet: 'https://ethereum-rpc.publicnode.com', sepolia: 'https://ethereum-sepolia-rpc.publicnode.com' };
+const ETH_EXPLORER = { mainnet: 'https://etherscan.io', sepolia: 'https://sepolia.etherscan.io' };
+const SYM = { GBP: '£', USD: '$', EUR: '€' };
+
+const sel = document.getElementById('tenant');
+for (const id of Object.keys(TENANTS)) { const o = document.createElement('option'); o.value = id; o.textContent = id; sel.appendChild(o); }
+
+function fmt(amountStr, decimals, currency) {
+  let s = String(amountStr); const neg = s.startsWith('-'); if (neg) s = s.slice(1);
+  let whole, frac;
+  if (!s.includes('.')) { // integer minor or whole units depending on caller; here pass human units
+    whole = s; frac = '';
+  } else { [whole, frac] = s.split('.'); }
+  whole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const sym = SYM[currency]; if (sym) frac = (frac || '').padEnd(2, '0').slice(0, 2);
+  const num = frac ? whole + '.' + frac : whole;
+  return (neg ? '-' : '') + (sym ? sym + num : num + ' ' + currency);
+}
+const stagesEl = document.getElementById('stages');
+function stage(name, ok, detail) { const d = document.createElement('div'); d.className = 'stage ' + (ok ? 'ok' : 'fail'); d.textContent = name + (detail ? ' — ' + detail : ''); stagesEl.appendChild(d); return ok; }
+
+async function xrplRpc(net, method, params) {
+  const r = await fetch(XRPL_RPC[net], { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method, params: [params] }) });
+  const b = await r.json();
+  if (b.result?.status !== 'success') throw new Error(method + ': ' + (b.result?.error_message || b.result?.error || 'error'));
+  return b.result;
+}
+async function ethTotalSupply(rpc, contract) {
+  const r = await fetch(rpc, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: contract, data: '0x18160ddd' }, 'latest'] }) });
+  const b = await r.json();
+  if (b.error) throw new Error(b.error.message);
+  return BigInt(b.result); // wei-style minor units
+}
+function scaleByDecimals(bi, decimals) {
+  const s = bi.toString().padStart(decimals + 1, '0');
+  const whole = s.slice(0, s.length - decimals) || '0';
+  const frac = decimals ? '.' + s.slice(s.length - decimals) : '';
+  return whole + frac;
+}
+
+function renderPinAndLinks(id, t) {
+  const exp = XRPL_EXPLORER[t.network];
+  document.getElementById('pin').innerHTML =
+    'Pinned for <b>' + id + '</b> (' + t.network + ')<br>attestation account: <b>' + t.attestationAccount + '</b>';
+  const links = document.getElementById('links'); links.innerHTML = '<b>View on-ledger:</b>';
+  const a = (href, text) => { const e = document.createElement('a'); e.href = href; e.target = '_blank'; e.rel = 'noopener'; e.textContent = text; links.appendChild(e); };
+  a(exp + '/accounts/' + t.attestationAccount, '→ attestation account on the XRP Ledger');
+  for (const tok of t.tokens) {
+    if (tok.chain === 'xrpl') a(exp + '/accounts/' + tok.issuer, '→ ' + tok.label + ' issuer (its obligations = the issued treasury balance)');
+    else if (tok.chain === 'ethereum') { const eh = ETH_EXPLORER[t.network === 'testnet' ? 'sepolia' : 'mainnet']; a(eh + '/token/' + tok.contract, '→ ' + tok.label + ' token on Etherscan'); }
+  }
+}
+sel.onchange = () => { stagesEl.innerHTML = ''; document.getElementById('balance').textContent = ''; renderPinAndLinks(sel.value, TENANTS[sel.value]); };
+
+document.getElementById('run').onclick = async () => {
+  const id = sel.value, t = TENANTS[id];
+  stagesEl.innerHTML = ''; document.getElementById('balance').textContent = '';
+  const btn = document.getElementById('run'); btn.disabled = true;
+  const exp = XRPL_EXPLORER[t.network];
+  let parts = [];
+  try {
+    // latest attestation tx (best-effort)
+    try {
+      const r = await xrplRpc(t.network, 'account_tx', { account: t.attestationAccount, ledger_index_min: -1, ledger_index_max: -1, limit: 1, forward: false });
+      const e = (r.transactions || [])[0]; const tx = e?.tx || e?.tx_json || {};
+      if (tx.hash) { stage('Latest attestation transaction', true, tx.hash.slice(0, 16) + '…');
+        const d = document.createElement('div'); d.className = 'stage info';
+        d.innerHTML = '<a href="' + exp + '/transactions/' + tx.hash + '" target="_blank" rel="noopener">view attestation tx on the XRP Ledger →</a>'; stagesEl.appendChild(d); }
+    } catch (e) { stage('Latest attestation transaction', false, 'XRPL read blocked (' + e.message + ') — use the links below'); }
+
+    // per-token live on-chain supply (the treasury balance)
+    for (const tok of t.tokens) {
+      try {
+        if (tok.chain === 'xrpl') {
+          const gb = await xrplRpc(t.network, 'gateway_balances', { account: tok.issuer, ledger_index: 'validated' });
+          const obl = (gb.obligations && gb.obligations[tok.currency]) || '0';
+          parts.push(tok.label + ': ' + fmt(obl, tok.decimals, tok.currency));
+          stage(tok.label + ' issued (XRPL gateway_balances)', true, fmt(obl, tok.decimals, tok.currency));
+        } else if (tok.chain === 'ethereum') {
+          const supply = await ethTotalSupply(ETH_RPC[t.network === 'testnet' ? 'sepolia' : 'mainnet'], tok.contract);
+          const human = scaleByDecimals(supply, tok.decimals);
+          parts.push(tok.label + ': ' + fmt(human, tok.decimals, tok.currency));
+          stage(tok.label + ' totalSupply (on-chain)', true, fmt(human, tok.decimals, tok.currency));
+        }
+      } catch (e) { stage(tok.label + ' on-chain read', false, e.message + ' — use the link below'); }
+    }
+    document.getElementById('balance').textContent = parts.length ? ('On-chain treasury: ' + parts.join('  ·  ')) : 'On-chain read unavailable — open the ledger links below to verify directly.';
+  } finally { btn.disabled = false; }
+};
+
+// initial render
+renderPinAndLinks(sel.value, TENANTS[sel.value]);
+</script>
+</body>
+</html>

@@ -4,6 +4,14 @@ Open-source verifier for the **BIPCircle public-reserve-verifier protocol v1**. 
 
 The verifier reads primary sources (the XRPL ledger, the bank-service's published JWKS, the witness file in GCS, and the on-chain token contract) and re-derives the same checks BIPCircle's anchor side runs internally. The trust roots are **pinned in the verifier source**, not user input, so a wrong URL or social-engineered tx hash can't produce a false PASS.
 
+## Verify in your browser (no install)
+
+**[→ Open the hosted treasury verifier](https://lazy-jack-ltd.github.io/bipcircle-verifier/)** — reads the
+**live on-chain treasury balance** for a pinned tenant straight from the XRP Ledger and links you to the
+raw ledger (attestation account + token issuer account, whose obligations *are* the issued balance). No
+login, no install, no trust in BIPCircle's servers. The full cryptographic reserves-vs-bank check (signed
+witness + JWKS + Merkle) still runs in the CLI below — the page links to it.
+
 ## Install
 
 ```bash
@@ -253,6 +261,11 @@ MIT — see [LICENSE](./LICENSE).
   - **Treasury balance is now shown formatted** — `bank reserves: £1,002,457.00` / `on-chain supply: £1,002,457.00` with currency + decimals + thousands separators, plus a per-token breakdown — instead of the previous raw minor-units line (`reserves: 100245700 | supply: …`). Reserve currency/decimals are derived from the tenant's base token and surfaced in `result.stages.supply` (`reservesDecimals`, `reservesCurrency`).
   - **XRPL ACCOUNT links, not just the transaction** — the `VIEW ON-LEDGER:` block now links the **attestation account** and each **XRPL token issuer account** (whose on-ledger obligations are the issued balance), so a reviewer can click straight through to the treasury balance. Per-token issuer/contract are exposed on `result.stages.supply.perToken[]` and the tx hash on `result.stages.xrpl.txHash`.
   - Rendering extracted to a pure, unit-tested `src/report.js` (`renderHuman`, `formatMinor`, `explorerTxUrl`, `explorerAccountUrl`). 29 tests (up from 21).
+
+- **v0.3.1** — hosted browser verifier: `docs/index.html` (GitHub Pages) reads the live on-chain
+  treasury balance (XRPL `gateway_balances` + ETH `totalSupply`) and links to the raw ledger
+  (attestation account + token issuer accounts). The CLI now also prints the hosted page URL
+  (`web verifier:` line) so it's discoverable. Gives a shareable, no-install URL for treasury verification.
 
 Reproducible builds (bit-identical output) remain a later target.
 
