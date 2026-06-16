@@ -29,14 +29,7 @@ import { createInterface } from 'node:readline';
 import { platform } from 'node:os';
 import { verify } from '../src/index.js';
 import { listTenantIds } from '../src/tenantRegistry.js';
-
-function explorerUrl(txHash, network) {
-  // Official XRPL Foundation explorers — sibling subdomains, same UI.
-  // testnet.xrpl.org is the canonical test-network explorer; livenet.xrpl.org
-  // is the mainnet one. No third-party trust required.
-  const host = network === 'testnet' ? 'testnet.xrpl.org' : 'livenet.xrpl.org';
-  return `https://${host}/transactions/${txHash}`;
-}
+import { renderHuman, explorerTxUrl } from '../src/report.js';
 
 function openInBrowser(url) {
   const p = platform();
@@ -152,48 +145,13 @@ async function main() {
     process.exit(2);
   }
 
+  const network = args.network || 'mainnet';
   if (args.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else {
-    process.stdout.write(`\nVERDICT: ${result.verdict}\n`);
-    if (result.stages.witness) {
-      process.stdout.write(`  asOfDate: ${result.stages.witness.asOfDate}\n`);
-      process.stdout.write(`  tenantId: ${result.stages.witness.tenantId}\n`);
-      process.stdout.write(`  sealCount: ${result.stages.witness.sealCount}\n`);
-    }
-    if (result.stages.signatures) {
-      process.stdout.write(`  signatures: ${result.stages.signatures.sealsVerified}/${result.stages.signatures.sealsTotal} OK\n`);
-    }
-    if (result.stages.merkle) {
-      process.stdout.write(`  merkle root: ${result.stages.merkle.ok ? 'OK' : 'MISMATCH'}\n`);
-    }
-    if (result.stages.supply && !result.stages.supply.skipped) {
-      const s = result.stages.supply;
-      const tokenCount = s.tokenCount ?? (s.perToken ? s.perToken.length : 1);
-      if (s.ok) {
-        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | total supply (${tokenCount} token${tokenCount === 1 ? '' : 's'}): ${s.onChainSupplyMinorUnits} | match: ✓\n`);
-      } else {
-        process.stdout.write(`  reserves: ${s.reservesMinorUnits} | total supply (${tokenCount} token${tokenCount === 1 ? '' : 's'}): ${s.onChainSupplyMinorUnits} | SHORTFALL: ${s.shortfallMinorUnits}\n`);
-      }
-      if (s.perToken && s.perToken.length > 0) {
-        for (const t of s.perToken) {
-          process.stdout.write(`    [${t.chain}] ${t.label || t.currency}: ${t.supplyMinor}\n`);
-        }
-      }
-    } else if (result.stages.supply?.skipped) {
-      process.stdout.write(`  supply check: SKIPPED (${result.stages.supply.reason})\n`);
-    }
-    if (result.failures.length > 0) {
-      process.stdout.write(`\nFAILURES:\n`);
-      for (const f of result.failures) {
-        process.stdout.write(`  [${f.stage}] ${f.reason}\n`);
-      }
-    }
-
-    const url = explorerUrl(args['xrpl-tx'], args.network || 'mainnet');
-    process.stdout.write(`\nView on XRPL: ${url}\n`);
+    process.stdout.write(renderHuman(result, { network, txHash: args['xrpl-tx'] }));
     if (args['no-open'] !== true) {
-      await promptOpen(url);
+      await promptOpen(explorerTxUrl(args['xrpl-tx'], network));
     }
   }
 

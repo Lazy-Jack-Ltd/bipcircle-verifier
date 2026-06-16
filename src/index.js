@@ -121,6 +121,7 @@ export async function verify({
     }
     result.stages.xrpl = {
       ok: true,
+      txHash,
       ledgerIndex: txResult.ledgerIndex,
       account: txResult.account,
       memo: txResult.verifierMemo,
@@ -238,9 +239,11 @@ export async function verify({
       // Reserves: use decimals from the first ethereum token if present
       // (T-REX 18-dec default), else from the first token. Bank reserves
       // are denominated in the fiat currency, scaled to minor units.
-      const baseDecimals = trustRoots.tokens.find((t) => t.chain === 'ethereum')?.decimals
-        ?? trustRoots.tokens[0]?.decimals
-        ?? 2;
+      const baseToken = trustRoots.tokens.find((t) => t.chain === 'ethereum') ?? trustRoots.tokens[0];
+      const baseDecimals = baseToken?.decimals ?? 2;
+      // The bank reserve is the fiat backing — its currency is the fiat denomination of the base token
+      // (e.g. the ETH T-REX token's `currency: 'GBP'`), not an on-ledger ticker like 'TVV'.
+      const reservesCurrency = baseToken?.currency ?? '';
       const reservesMinor = sumBankReserves(witness.seals, baseDecimals);
 
       const perToken = [];
@@ -280,6 +283,9 @@ export async function verify({
           label: tok.label || `${tok.currency}-${tok.chain}`,
           chain: tok.chain,
           currency: tok.currency,
+          decimals: tok.decimals,
+          issuer: tok.issuer ?? null,     // XRPL issuer account (its obligations = the on-ledger balance)
+          contract: tok.contract ?? null, // ETH token contract
           supplyMinor: supplyMinor.toString(),
           rebasedToReservesMinor: rebased.toString(),
         });
@@ -297,6 +303,8 @@ export async function verify({
       result.stages.supply = {
         ok: cmp.ok,
         ...cmp,
+        reservesDecimals: baseDecimals,
+        reservesCurrency,
         perToken,
         tokenCount: trustRoots.tokens.length,
       };

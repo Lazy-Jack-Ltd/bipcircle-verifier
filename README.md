@@ -73,10 +73,22 @@ VERDICT: PASS
   sealCount: 24
   signatures: 24/24 OK
   merkle root: OK
-  reserves: 100245700 | supply: 100245700 | match: ✓
+
+  TREASURY — bank reserves vs on-chain supply:
+    bank reserves:    £1,002,457.00
+    on-chain supply:  £1,002,457.00  (2 tokens)
+    result:           ✓ fully backed (reserves ≥ supply)
+      └ [ethereum] TVV-ETH-Sepolia: £600,000.00
+      └ [xrpl] TVV-XRPL-Testnet: 402,457 TVV
+
+VIEW ON-LEDGER:
+  attestation tx:        https://livenet.xrpl.org/transactions/<hash>
+  attestation account:   https://livenet.xrpl.org/accounts/<issuer>
+  TVV-ETH-Sepolia token:        https://sepolia.etherscan.io/token/<contract>
+  TVV-XRPL-Testnet issuer (balance): https://livenet.xrpl.org/accounts/<token-issuer>
 ```
 
-The "match ✓" line is the on-chain supply comparison: reserves measured in bank-side minor units (pennies/cents) compared to the on-chain token `totalSupply()`.
+The TREASURY block is the on-chain supply comparison: bank-side reserves (from the signed witness seals) vs the live on-chain token supply, shown **formatted with currency** (not raw minor units). The VIEW ON-LEDGER block links to the official XRPL Foundation explorer — including the **issuer account** pages whose on-ledger obligations *are* the issued balance, so you can click straight through to the treasury, not just the attestation transaction.
 
 ## Use — unsafe-override (ad-hoc verification of an unregistered tenant)
 
@@ -89,9 +101,14 @@ bipcircle-verify \
 
 For tenants not yet in the verifier's pinned registry. Operator accepts the trust-anchor responsibility. Both the URL and the issuer address need to come from a trusted out-of-band source (DPA, GFSC registry, etc.). On-chain supply check is skipped in this mode (no token-contract config available).
 
-## After PASS — inspect the underlying XRPL transaction
+## After PASS — inspect the treasury on-ledger
 
-Every successful run prints a `View on XRPL:` line linking to the official XRPL Foundation explorer for the network you specified (`testnet.xrpl.org` or `livenet.xrpl.org`). On an interactive terminal the CLI offers a press-Enter prompt that opens the URL in your operating system's default browser. Pass `--no-open` to suppress the prompt (useful in CI or scripted contexts; the URL is still printed for the log).
+Every run prints a `VIEW ON-LEDGER:` block linking to the official XRPL Foundation explorer for the network you specified (`testnet.xrpl.org` or `livenet.xrpl.org`):
+- **attestation tx** — the daily reserve-attestation transaction.
+- **attestation account** — the issuer account that published it.
+- **per-token issuer (balance)** — for each XRPL token, the issuer account page whose *obligations* are the issued balance (i.e. the treasury balance you can see directly on-ledger); for ETH tokens, an Etherscan link to the token contract.
+
+On an interactive terminal the CLI offers a press-Enter prompt that opens the attestation tx in your operating system's default browser. Pass `--no-open` to suppress the prompt (useful in CI or scripted contexts; the URLs are still printed for the log).
 
 The explorer page lets you independently confirm the tx's `Account`, `Memos`, `Sequence`, and ledger-validation state without any platform infrastructure in the loop, useful as a cross-check that the verifier and the XRPL ledger agree.
 
@@ -232,8 +249,12 @@ MIT — see [LICENSE](./LICENSE).
 - **v0.1.3** — first pinned tenant and XRPL explorer UX:
   - **`tvvin` tenant pinned in `src/tenants.json`** — the testnet Sepolia ERC-3643 stablecoin issuer at `0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4`, XRPL issuer `rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4`, bank-service URL `https://bank-service-tvvin-yrikeqyelq-nw.a.run.app`. First end-to-end verification against this tenant landed PASS on tx `7753CF92C7C017D2C9C721F1A72F3BEA55030DD655D6377E7750C757FB711E57`.
   - **XRPL explorer URL in the CLI output** — every successful run now prints `View on XRPL: https://testnet.xrpl.org/transactions/<hash>` (mainnet: `livenet.xrpl.org`). On an interactive TTY the CLI also offers a press-Enter prompt to launch the URL in the operating system's default browser. Add `--no-open` to suppress the prompt for CI or scripted contexts.
+- **v0.3.0** — treasury balance + on-ledger account links (output, not protocol):
+  - **Treasury balance is now shown formatted** — `bank reserves: £1,002,457.00` / `on-chain supply: £1,002,457.00` with currency + decimals + thousands separators, plus a per-token breakdown — instead of the previous raw minor-units line (`reserves: 100245700 | supply: …`). Reserve currency/decimals are derived from the tenant's base token and surfaced in `result.stages.supply` (`reservesDecimals`, `reservesCurrency`).
+  - **XRPL ACCOUNT links, not just the transaction** — the `VIEW ON-LEDGER:` block now links the **attestation account** and each **XRPL token issuer account** (whose on-ledger obligations are the issued balance), so a reviewer can click straight through to the treasury balance. Per-token issuer/contract are exposed on `result.stages.supply.perToken[]` and the tx hash on `result.stages.xrpl.txHash`.
+  - Rendering extracted to a pure, unit-tested `src/report.js` (`renderHuman`, `formatMinor`, `explorerTxUrl`, `explorerAccountUrl`). 29 tests (up from 21).
 
-Reproducible builds (bit-identical output) remain a 0.3.0 target.
+Reproducible builds (bit-identical output) remain a later target.
 
 ## Lazy-Jack sister projects (cross-announcement)
 
