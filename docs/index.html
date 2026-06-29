@@ -45,14 +45,18 @@
 const TENANTS = {
   tvvin: {
     network: 'testnet',
-    attestationAccount: 'rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4', // publishes the daily reserve attestation tx
+    // tvvin-sandbox (Staging TVV). On-chain attestation publishing is off on staging, so the anchor
+    // account is the issuer itself; the live treasury read below is the figure that matters.
+    attestationAccount: 'rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34',
     tokens: [
-      { label: 'TVV-XRPL-Testnet', chain: 'xrpl', issuer: 'rUQ1ASSoETT3ujFH2N469Nfi1BKW4xDFTf', currency: 'TVV', decimals: 0 },
-      { label: 'TVV-ETH-Sepolia', chain: 'ethereum', contract: '0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4', currency: 'GBP', decimals: 18 },
+      { label: 'TVV-XRPL-Testnet', chain: 'xrpl', issuer: 'rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34', currency: 'TVV', decimals: 0 },
+      { label: 'TVV-ETH-Sepolia', chain: 'ethereum', contract: '0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE', currency: 'GBP', decimals: 18 },
     ],
   },
 };
-const XRPL_RPC = { mainnet: 'https://xrplcluster.com', testnet: 'https://s.altnet.rippletest.net:51234/' };
+// testnet endpoint MUST send CORS headers (s.altnet.rippletest.net does NOT → browser reads fail
+// "Load failed"); testnet.xrpl-labs.com returns access-control-allow-origin:* and serves the same JSON-RPC.
+const XRPL_RPC = { mainnet: 'https://xrplcluster.com', testnet: 'https://testnet.xrpl-labs.com/' };
 const XRPL_EXPLORER = { mainnet: 'https://livenet.xrpl.org', testnet: 'https://testnet.xrpl.org' };
 const ETH_RPC = { mainnet: 'https://ethereum-rpc.publicnode.com', sepolia: 'https://ethereum-sepolia-rpc.publicnode.com' };
 const ETH_EXPLORER = { mainnet: 'https://etherscan.io', sepolia: 'https://sepolia.etherscan.io' };
