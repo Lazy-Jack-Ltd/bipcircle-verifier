@@ -39,7 +39,7 @@ import { fetchAttestationTx } from './xrpl.js';
 import { fetchAndValidateWitness } from './witness.js';
 import { fetchJwks } from './keys.js';
 import { verifySealSignatures } from './sigverify.js';
-import { computeMerkleRoot } from './merkle.js';
+import { computeMerkleRootForVersion } from './merkle.js';
 import { lookupTenant } from './tenantRegistry.js';
 import {
   getEthereumErc20TotalSupply,
@@ -202,11 +202,15 @@ export async function verify({
     failures: sigFailures,
   };
 
-  const derivedRoot = computeMerkleRoot(leaves);
+  // POR-MERKLE-V1-MALLEABLE-02: dispatch the Merkle algorithm on the witness's
+  // declared protocolVersion. v2 witnesses use the RFC-6962 domain-separated
+  // root (non-malleable); already-published v1 witnesses still verify with v1.
+  const derivedRoot = computeMerkleRootForVersion(leaves, witness.protocolVersion);
   result.stages.merkle = {
     ok: derivedRoot === memo.sealMerkleRoot,
     claimed: memo.sealMerkleRoot,
     derived: derivedRoot,
+    protocolVersion: witness.protocolVersion || 'v1',
   };
   if (!result.stages.merkle.ok) {
     result.failures.push({
