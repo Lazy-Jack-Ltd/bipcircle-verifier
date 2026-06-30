@@ -244,7 +244,10 @@ export async function verify({
       // The bank reserve is the fiat backing — its currency is the fiat denomination of the base token
       // (e.g. the ETH T-REX token's `currency: 'GBP'`), not an on-ledger ticker like 'TVV'.
       const reservesCurrency = baseToken?.currency ?? '';
-      const reservesMinor = sumBankReserves(witness.seals, baseDecimals);
+      // POR-RESERVE-DOUBLECOUNT-01: pass the reserves currency so only matching
+      // balances are summed, and the per-account dedup runs (was unfiltered +
+      // double-counting intra-day reads).
+      const reservesMinor = sumBankReserves(witness.seals, baseDecimals, reservesCurrency);
 
       const perToken = [];
       let totalSupplyMinor = 0n;
