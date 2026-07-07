@@ -110,12 +110,33 @@ export async function getXrplIssuedSupply({ rpcUrl, issuerAddress, currencyCode,
  *   (back-compat), but the per-account dedup still runs.
  * @returns {bigint} sum in minor units
  */
-export function sumBankReserves(witnessSeals, decimals, reservesCurrency = null) {
+export function sumBankReserves(witnessSeals, decimals, reservesCurrency = null, opts = {}) {
   if (!Array.isArray(witnessSeals)) {
     throw new Error('sumBankReserves: witnessSeals must be an array');
   }
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
     throw new Error(`sumBankReserves: decimals must be 0..18, got ${decimals}`);
+  }
+
+  // POR-SEAL-FRESHNESS-01 (2026-07-07): the seal ECDSA signature never expires, so
+  // a genuine balance seal from any past instant would otherwise be summable as a
+  // CURRENT reserve. Combined with `currentSupply` being read LIVE and `asOfDate`
+  // being operator-set/unsigned, that enabled attest-then-drain-then-replay: hold
+  // £1m + get a real balance seal, drain to £100k while supply stays 1m tokens,
+  // then publish today's witness reusing the OLD seal under asOfDate=today →
+  // reserves(1m) >= supply(1m) → false PASS on a real shortfall. Gate every
+  // summed seal's signed timestamp to a bounded window around the witness asOfDate
+  // (the producer already enforces same-day seals; a stale seal in a witness is an
+  // anomaly → fail loud) and require the seal be a genuine balance-endpoint read.
+  // `asOfDate` (a UTC date string) + window are passed by the caller; when absent
+  // the gate is skipped for back-compat (callers in the real verify flow MUST pass
+  // them — see index.js).
+  const asOfDate = typeof opts.asOfDate === 'string' ? opts.asOfDate : null;
+  const maxSealAgeHours = Number.isFinite(opts.maxSealAgeHours) ? opts.maxSealAgeHours : 48;
+  const expectedEndpoint = opts.expectedEndpoint === undefined ? '/v1/balance' : opts.expectedEndpoint;
+  const asOfEpochMs = asOfDate ? Date.parse(`${asOfDate}T00:00:00Z`) : NaN;
+  if (asOfDate && Number.isNaN(asOfEpochMs)) {
+    throw new Error(`sumBankReserves: witness asOfDate is not a valid date: ${asOfDate}`);
   }
 
   // Collapse to one authoritative balance per (currency, provider) account.
@@ -130,6 +151,24 @@ export function sumBankReserves(witnessSeals, decimals, reservesCurrency = null)
     }
     const balanceStr = payload.availableBalance;
     if (typeof balanceStr !== 'string') continue; // seal isn't a balance read; skip
+    // POR-SEAL-FRESHNESS-01: a balance seal MUST be from the balance endpoint —
+    // reject any bank-kid-signed blob of another endpoint/type being summed as a
+    // reserve. Enforced only when the caller pins expectedEndpoint (real flow does).
+    if (expectedEndpoint && payload.endpoint !== undefined && payload.endpoint !== expectedEndpoint) {
+      throw new Error(`sumBankReserves: seal ${seal.eventId} endpoint '${payload.endpoint}' is not the expected balance endpoint '${expectedEndpoint}' — a non-balance seal must not be counted as a reserve (POR-SEAL-FRESHNESS-01)`);
+    }
+    // POR-SEAL-FRESHNESS-01: gate the seal's signed timestamp to the witness date.
+    if (asOfDate) {
+      const sealTs = String(payload.asOf || seal.signedAt || '');
+      const sealMs = Date.parse(sealTs);
+      if (Number.isNaN(sealMs)) {
+        throw new Error(`sumBankReserves: seal ${seal.eventId} has no parseable signed timestamp (asOf/signedAt='${sealTs}') — cannot verify freshness (POR-SEAL-FRESHNESS-01)`);
+      }
+      const ageMs = Math.abs(sealMs - asOfEpochMs);
+      if (ageMs > maxSealAgeHours * 3600 * 1000) {
+        throw new Error(`sumBankReserves: seal ${seal.eventId} signed ${sealTs} is > ${maxSealAgeHours}h from the witness asOfDate ${asOfDate} — a stale/replayed reserve seal must not back a current supply (POR-SEAL-FRESHNESS-01: attest-then-drain-then-replay)`);
+      }
+    }
     const currency = typeof payload.currency === 'string' ? payload.currency : '';
     // Only count the token's reserves currency. An empty reservesCurrency means
     // "no config" — fall back to summing all currencies (still deduped).

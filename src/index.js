@@ -251,7 +251,16 @@ export async function verify({
       // POR-RESERVE-DOUBLECOUNT-01: pass the reserves currency so only matching
       // balances are summed, and the per-account dedup runs (was unfiltered +
       // double-counting intra-day reads).
-      const reservesMinor = sumBankReserves(witness.seals, baseDecimals, reservesCurrency);
+      // POR-SEAL-FRESHNESS-01: gate every summed seal to the witness date + the
+      // balance endpoint, so a stale/replayed or wrong-endpoint seal cannot back a
+      // live supply (attest-then-drain-then-replay). asOfDate is the witness date;
+      // the producer enforces same-day seals, so the 48h window only rejects
+      // genuinely stale seals.
+      const reservesMinor = sumBankReserves(witness.seals, baseDecimals, reservesCurrency, {
+        asOfDate: witness.asOfDate,
+        maxSealAgeHours: 48,
+        expectedEndpoint: '/v1/balance',
+      });
 
       const perToken = [];
       let totalSupplyMinor = 0n;
