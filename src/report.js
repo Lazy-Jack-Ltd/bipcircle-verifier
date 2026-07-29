@@ -75,26 +75,37 @@ export function renderHuman(result, { network = 'mainnet', txHash } = {}) {
   if (mk) L.push(`  merkle root: ${mk.ok ? 'OK' : 'MISMATCH'}`);
 
   const s = result.stages?.supply;
-  if (s && !s.skipped) {
-    const dec = s.reservesDecimals ?? 0;
-    const cur = s.reservesCurrency || '';
-    const tokenCount = s.tokenCount ?? (s.perToken ? s.perToken.length : 1);
+  if (s && !s.skipped && Array.isArray(s.cells)) {
+    // v0.5.0 — per-currency-cell verification. Each cell is legally
+    // segregated, so figures are NEVER totalled across cells: a cross-cell
+    // total is exactly the netting this verifier exists to refuse.
     L.push('');
-    L.push('  TREASURY — bank reserves vs on-chain supply:');
-    L.push(`    bank reserves:    ${formatMinor(s.reservesMinorUnits, dec, cur)}`);
-    L.push(`    on-chain supply:  ${formatMinor(s.onChainSupplyMinorUnits, dec, cur)}  (${tokenCount} token${tokenCount === 1 ? '' : 's'})`);
-    L.push(`    result:           ${s.ok ? '✓ fully backed (reserves ≥ supply)' : `✗ SHORTFALL ${formatMinor(s.shortfallMinorUnits, dec, cur)}`}`);
-    for (const t of (s.perToken || [])) {
-      L.push(`      └ [${t.chain}] ${t.label}: ${formatMinor(t.supplyMinor, t.decimals ?? 0, t.currency || '')}`);
+    L.push(`  TREASURY — bank reserves vs on-chain supply, per currency cell (${s.cellCount} cell${s.cellCount === 1 ? '' : 's'}, ${s.tokenCount} token${s.tokenCount === 1 ? '' : 's'}):`);
+    for (const c of s.cells) {
+      const dec = c.decimals ?? 0;
+      const cur = c.currency || '';
+      const accounts = c.reserveAccountCount ?? 0;
+      L.push(`    [${cur}] cell:`);
+      L.push(`      bank reserves:    ${formatMinor(c.reservesMinorUnits, dec, cur)}  (${accounts} bank account${accounts === 1 ? '' : 's'})`);
+      L.push(`      on-chain supply:  ${formatMinor(c.onChainSupplyMinorUnits, dec, cur)}`);
+      L.push(`      result:           ${c.ok ? '✓ fully backed (reserves ≥ supply)' : `✗ SHORTFALL ${formatMinor(c.shortfallMinorUnits, dec, cur)}`}`);
+      for (const t of (c.perToken || [])) {
+        L.push(`        └ [${t.chain}] ${t.label}: ${formatMinor(t.supplyMinor, t.decimals ?? 0, t.currency || '')}`);
+      }
     }
   } else if (s?.skipped) {
-    L.push(`  treasury balance: SKIPPED (${s.reason || 'on-chain supply check skipped'})`);
+    L.push(`  treasury balance: NOT VERIFIED (${s.reason || 'on-chain supply check skipped'})`);
   }
 
   if (result.failures?.length) {
     L.push('');
     L.push('FAILURES:');
     for (const f of result.failures) L.push(`  [${f.stage}] ${f.reason}`);
+  }
+  if (result.inconclusive?.length) {
+    L.push('');
+    L.push('NOT VERIFIED (verdict cannot be PASS):');
+    for (const f of result.inconclusive) L.push(`  [${f.stage}] ${f.reason}`);
   }
 
   // On-ledger links — always the attestation tx + account; per-token issuer/contract when known.
@@ -104,7 +115,8 @@ export function renderHuman(result, { network = 'mainnet', txHash } = {}) {
   L.push('VIEW ON-LEDGER:');
   if (tx) L.push(`  attestation tx:        ${explorerTxUrl(tx, network)}`);
   if (acct) L.push(`  attestation account:   ${explorerAccountUrl(acct, network)}`);
-  for (const t of (result.stages?.supply?.perToken || [])) {
+  const linkTokens = (result.stages?.supply?.cells || []).flatMap((c) => c.perToken || []);
+  for (const t of linkTokens) {
     if (t.chain === 'xrpl' && t.issuer) {
       L.push(`  ${t.label} issuer (balance): ${explorerAccountUrl(t.issuer, network)}`);
     } else if (t.chain === 'ethereum' && t.contract) {

@@ -45,16 +45,23 @@ describe('renderHuman', () => {
       xrpl: { txHash: 'DEADBEEF', account: 'rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4' },
       supply: {
         ok: true,
-        reservesMinorUnits: '5000000000000000000',
-        onChainSupplyMinorUnits: '5000000000000000000',
-        shortfallMinorUnits: '0',
-        reservesDecimals: 18,
-        reservesCurrency: 'GBP',
+        cellCount: 1,
         tokenCount: 2,
-        perToken: [
-          { label: 'TVV-ETH-Sepolia', chain: 'ethereum', currency: 'GBP', decimals: 18, contract: '0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4', issuer: null, supplyMinor: '3000000000000000000' },
-          { label: 'TVV-XRPL-Testnet', chain: 'xrpl', currency: 'TVV', decimals: 0, issuer: 'rUQ1ASSoETT3ujFH2N469Nfi1BKW4xDFTf', contract: null, supplyMinor: '2' },
-        ],
+        cells: [{
+          currency: 'GBP',
+          decimals: 18,
+          ok: true,
+          reservesMinorUnits: '5000000000000000000',
+          onChainSupplyMinorUnits: '5000000000000000000',
+          shortfallMinorUnits: '0',
+          toleranceMinorUnits: '0',
+          reserveAccountCount: 1,
+          reserveSealCount: 1,
+          perToken: [
+            { label: 'TVV-ETH-Sepolia', chain: 'ethereum', currency: 'GBP', cellCurrency: 'GBP', decimals: 18, contract: '0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4', issuer: null, supplyMinor: '3000000000000000000' },
+            { label: 'TVV-XRPL-Testnet', chain: 'xrpl', currency: 'TVV', cellCurrency: 'GBP', decimals: 0, issuer: 'rUQ1ASSoETT3ujFH2N469Nfi1BKW4xDFTf', contract: null, supplyMinor: '2' },
+          ],
+        }],
       },
     },
     failures: [],
@@ -81,10 +88,46 @@ describe('renderHuman', () => {
     assert.match(out, /web verifier:\s+https:\/\/lazy-jack-ltd\.github\.io\/bipcircle-verifier\//);
   });
 
-  test('still shows balance section when skipped is flagged', () => {
-    const skipped = { verdict: 'PASS', stages: { xrpl: { txHash: 'X', account: 'rA' }, supply: { skipped: true, reason: 'on-chain check skipped' } }, failures: [] };
+  test('a skipped supply stage renders as NOT VERIFIED with an INCONCLUSIVE verdict block', () => {
+    const skipped = {
+      verdict: 'INCONCLUSIVE',
+      stages: { xrpl: { txHash: 'X', account: 'rA' }, supply: { ok: null, skipped: true, reason: 'skipped by flag (--skip-onchain)' } },
+      failures: [],
+      inconclusive: [{ stage: 'supply', reason: 'SUPPLY_CHECK_SKIPPED: reserve backing was NOT verified' }],
+    };
     const out = renderHuman(skipped, { network: 'testnet' });
-    assert.match(out, /treasury balance: SKIPPED/);
+    assert.match(out, /VERDICT: INCONCLUSIVE/);
+    assert.match(out, /treasury balance: NOT VERIFIED/);
+    assert.match(out, /NOT VERIFIED \(verdict cannot be PASS\):/);
+    assert.match(out, /SUPPLY_CHECK_SKIPPED/);
     assert.match(out, /attestation account:\s+https:\/\/testnet\.xrpl\.org\/accounts\/rA/); // account link still shown
+  });
+
+  test('per-cell figures are NEVER totalled across cells (no cross-currency sum line)', () => {
+    const twoCells = {
+      verdict: 'FAIL',
+      stages: {
+        xrpl: { txHash: 'X', account: 'rA' },
+        supply: {
+          ok: false,
+          cellCount: 2,
+          tokenCount: 2,
+          cells: [
+            { currency: 'EUR', decimals: 2, ok: true, reservesMinorUnits: '1000000000', onChainSupplyMinorUnits: '10000', shortfallMinorUnits: '0', toleranceMinorUnits: '0', reserveAccountCount: 1, perToken: [] },
+            { currency: 'GBP', decimals: 2, ok: false, reservesMinorUnits: '50000000', onChainSupplyMinorUnits: '100000000', shortfallMinorUnits: '50000000', toleranceMinorUnits: '0', reserveAccountCount: 1, perToken: [] },
+          ],
+        },
+      },
+      failures: [{ stage: 'supply', reason: 'RESERVE_SHORTFALL[GBP]: …' }],
+      inconclusive: [],
+    };
+    const out = renderHuman(twoCells, { network: 'testnet' });
+    assert.match(out, /\[EUR\] cell:/);
+    assert.match(out, /\[GBP\] cell:/);
+    assert.match(out, /✗ SHORTFALL £500,000\.00/);
+    assert.match(out, /✓ fully backed/);
+    // €10m + £500k must never appear as one merged figure under one symbol.
+    assert.doesNotMatch(out, /£10,500,000/);
+    assert.doesNotMatch(out, /€10,500,000/);
   });
 });

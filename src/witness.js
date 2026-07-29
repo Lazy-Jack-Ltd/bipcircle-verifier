@@ -14,7 +14,15 @@
 
 import crypto from 'node:crypto';
 
-const PROTOCOL_VERSION = 'v1';
+// v3 (2026-07-29): the multi-bank / per-cell witness generation. Same
+// RFC-6962 Merkle tree as v2; balance seal payloads additionally carry an
+// account reference (bankAccountId) so several accounts at one provider sum
+// correctly. Pre-0.5.0 verifiers do NOT list v3 and therefore refuse a v3
+// witness loudly instead of collapsing same-provider accounts into a false
+// FAIL — SUPPORTED_PROTOCOL_VERSIONS is the protocol's only fail-closed
+// evolution lever, and the producer MUST stamp v3 the moment it emits
+// multi-account witnesses.
+const SUPPORTED_PROTOCOL_VERSIONS = new Set(['v1', 'v2', 'v3']);
 // Self-audit (v0.1.1): bounded fetch — witness files are operator-
 // hosted but cold or rate-limited GCS responses must not hang the
 // verifier. 30s gives slack for slow regional fetches.
@@ -57,8 +65,8 @@ export async function fetchAndValidateWitness({ witnessUrl, expectedWitnessSha25
       throw new Error(`WITNESS_SCHEMA: missing required field '${f}'`);
     }
   }
-  if (witness.protocolVersion !== PROTOCOL_VERSION) {
-    throw new Error(`WITNESS_SCHEMA: unsupported protocolVersion '${witness.protocolVersion}' (this verifier supports '${PROTOCOL_VERSION}')`);
+  if (!SUPPORTED_PROTOCOL_VERSIONS.has(witness.protocolVersion)) {
+    throw new Error(`WITNESS_SCHEMA: unsupported protocolVersion '${witness.protocolVersion}' (supported: ${[...SUPPORTED_PROTOCOL_VERSIONS].join(', ')}). A newer protocol usually means this verifier is out of date — upgrade @lazyjackorg/bipcircle-verifier rather than trusting a partial read.`);
   }
   if (!Array.isArray(witness.seals) || witness.seals.length === 0) {
     throw new Error('WITNESS_SCHEMA: seals[] must be a non-empty array');

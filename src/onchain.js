@@ -103,6 +103,19 @@ export async function getXrplIssuedSupply({ rpcUrl, issuerAddress, currencyCode,
  * summing. Defense-in-depth: the producer also dedups at witness-build time, but
  * the verifier must NOT trust that — it re-derives the safe total itself.
  *
+ * POR-MULTIBANK-ACCOUNT-01 (2026-07-29): the dedup key was `(currency,
+ * provider)`, which collapses SEVERAL ACCOUNTS AT ONE INSTITUTION — the
+ * expected shape at ten banks — down to one, under-reporting the reserve and
+ * manufacturing a false FAIL. The signed seal payload may now carry an account
+ * reference (`bankAccountId`, falling back to `accountId` / `connectionId`);
+ * when present it joins the dedup key, so distinct accounts at one provider
+ * each contribute their latest balance. Seals without an account reference
+ * keep the old `(currency, provider)` collapse — published v1/v2 witnesses
+ * verify byte-identically. Mixing referenced and unreferenced seals for the
+ * SAME (currency, provider) is rejected loudly: that shape would let the same
+ * account be counted twice (once under '' and once under its id), inflating
+ * the reserve — the producer must be consistent per provider.
+ *
  * @param {Array} witnessSeals — witness.seals[]
  * @param {number} decimals — token decimals (e.g., 2 for GBP-cents)
  * @param {string|null} [reservesCurrency] — only count balances in this fiat
@@ -111,6 +124,19 @@ export async function getXrplIssuedSupply({ rpcUrl, issuerAddress, currencyCode,
  * @returns {bigint} sum in minor units
  */
 export function sumBankReserves(witnessSeals, decimals, reservesCurrency = null, opts = {}) {
+  return sumBankReservesDetailed(witnessSeals, decimals, reservesCurrency, opts).totalMinorUnits;
+}
+
+/**
+ * Detailed variant of sumBankReserves — same gates, same total, plus how many
+ * distinct bank accounts and matching balance seals contributed. The caller
+ * (index.js) uses the counts to say, per currency cell, whether ANY reserve
+ * evidence existed at all — a zero built from zero seals must never be
+ * indistinguishable from a genuine zero balance.
+ *
+ * @returns {{ totalMinorUnits: bigint, accountCount: number, matchedSealCount: number }}
+ */
+export function sumBankReservesDetailed(witnessSeals, decimals, reservesCurrency = null, opts = {}) {
   if (!Array.isArray(witnessSeals)) {
     throw new Error('sumBankReserves: witnessSeals must be an array');
   }
@@ -139,8 +165,15 @@ export function sumBankReserves(witnessSeals, decimals, reservesCurrency = null,
     throw new Error(`sumBankReserves: witness asOfDate is not a valid date: ${asOfDate}`);
   }
 
-  // Collapse to one authoritative balance per (currency, provider) account.
+  // Collapse to one authoritative balance per account. The account key is
+  // (currency, provider, accountRef) — accountRef '' for legacy seals that
+  // carry no account identity (POR-MULTIBANK-ACCOUNT-01).
   const latestByAccount = new Map();
+  // Guard state per (currency, provider): a provider whose seals MIX
+  // account-referenced and unreferenced balances could double-count one
+  // account. Fail loud rather than sum ambiguously.
+  const groupShape = new Map();
+  let matchedSealCount = 0;
   for (const seal of witnessSeals) {
     let payload;
     try {
@@ -174,7 +207,22 @@ export function sumBankReserves(witnessSeals, decimals, reservesCurrency = null,
     // "no config" — fall back to summing all currencies (still deduped).
     if (reservesCurrency && currency !== reservesCurrency) continue;
     const provider = typeof payload.provider === 'string' ? payload.provider : '';
-    const key = `${currency} ${provider}`;
+    // POR-MULTIBANK-ACCOUNT-01: account identity, when the producer signed one.
+    const accountRefRaw = [payload.bankAccountId, payload.accountId, payload.connectionId]
+      .find((v) => typeof v === 'string' && v.length > 0);
+    const accountRef = accountRefRaw || '';
+    const groupKey = `${currency} ${provider}`;
+    const shape = groupShape.get(groupKey) || { withRef: false, withoutRef: false };
+    if (accountRef) shape.withRef = true; else shape.withoutRef = true;
+    groupShape.set(groupKey, shape);
+    if (shape.withRef && shape.withoutRef) {
+      throw new Error(
+        `sumBankReserves: provider '${provider}' has ${currency} balance seals BOTH with and without an account reference — `
+        + `ambiguous account identity could count one account twice, so the sum is refused (POR-MULTIBANK-ACCOUNT-01)`,
+      );
+    }
+    matchedSealCount += 1;
+    const key = `${groupKey} ${accountRef}`;
     const asOf = String(payload.asOf || seal.signedAt || '');
     const existing = latestByAccount.get(key);
     const existingAsOf = existing ? existing.asOf : '';
@@ -191,7 +239,7 @@ export function sumBankReserves(witnessSeals, decimals, reservesCurrency = null,
   for (const entry of latestByAccount.values()) {
     total += decimalStringToMinorUnits(entry.balanceStr, decimals);
   }
-  return total;
+  return { totalMinorUnits: total, accountCount: latestByAccount.size, matchedSealCount };
 }
 
 /**

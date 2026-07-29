@@ -1,6 +1,8 @@
 # bipcircle-verifier
 
-Open-source verifier for the **BIPCircle public-reserve-verifier protocol v1**. Anyone can prove a BIPCircle stablecoin reserve attestation PASSes or FAILs without trusting BIPCircle or any Lazy-Jack infrastructure.
+Open-source verifier for the **BIPCircle public-reserve-verifier protocol**. Anyone can prove a BIPCircle stablecoin reserve attestation PASSes or FAILs without trusting BIPCircle or any Lazy-Jack infrastructure.
+
+Verification is **per currency cell** (v0.5.0): the issuer is a protected cell company, each cell holds one fiat currency and is legally segregated, so every cell's on-chain supply is compared against ONLY that currency's bank reserves. A surplus in one currency can never cover a shortfall in another. The verdict is three-state — `PASS`, `FAIL`, or `INCONCLUSIVE` (a required check could not be performed; never treat it as PASS).
 
 The verifier reads primary sources (the XRPL ledger, the bank-service's published JWKS, the witness file in GCS, and the on-chain token contract) and re-derives the same checks BIPCircle's anchor side runs internally. The trust roots are **pinned in the verifier source**, not user input, so a wrong URL or social-engineered tx hash can't produce a false PASS.
 
@@ -44,7 +46,7 @@ bipcircle-verify \
   --skip-onchain
 ```
 
-Either command should print `VERDICT: PASS` along with the witness, signature, and Merkle stage results (and on-chain supply match if `--skip-onchain` is not set).
+The first command should print `VERDICT: PASS` along with the witness, signature, Merkle, and per-cell reserve results. The second prints `VERDICT: INCONCLUSIVE` (exit 3): the integrity stages ran, but the reserve backing was not verified — a skipped check is never reported as a passed one.
 
 ## Pinned tenants in this build
 
@@ -82,12 +84,13 @@ VERDICT: PASS
   signatures: 24/24 OK
   merkle root: OK
 
-  TREASURY — bank reserves vs on-chain supply:
-    bank reserves:    £1,002,457.00
-    on-chain supply:  £1,002,457.00  (2 tokens)
-    result:           ✓ fully backed (reserves ≥ supply)
-      └ [ethereum] TVV-ETH-Sepolia: £600,000.00
-      └ [xrpl] TVV-XRPL-Testnet: 402,457 TVV
+  TREASURY — bank reserves vs on-chain supply, per currency cell (1 cell, 2 tokens):
+    [GBP] cell:
+      bank reserves:    £1,002,457.00  (1 bank account)
+      on-chain supply:  £1,002,457.00
+      result:           ✓ fully backed (reserves ≥ supply)
+        └ [ethereum] TVV-ETH-Sepolia: £600,000.00
+        └ [xrpl] TVV-XRPL-Testnet: 402,457 TVV
 
 VIEW ON-LEDGER:
   attestation tx:        https://livenet.xrpl.org/transactions/<hash>
@@ -96,7 +99,7 @@ VIEW ON-LEDGER:
   TVV-XRPL-Testnet issuer (balance): https://livenet.xrpl.org/accounts/<token-issuer>
 ```
 
-The TREASURY block is the on-chain supply comparison: bank-side reserves (from the signed witness seals) vs the live on-chain token supply, shown **formatted with currency** (not raw minor units). The VIEW ON-LEDGER block links to the official XRPL Foundation explorer — including the **issuer account** pages whose on-ledger obligations *are* the issued balance, so you can click straight through to the treasury, not just the attestation transaction.
+The TREASURY block is the on-chain supply comparison, one block per currency cell: bank-side reserves in that currency (from the signed witness seals) vs the live on-chain supply of that cell's tokens, shown **formatted with currency** (not raw minor units). Figures are never totalled across cells — a cross-currency total is exactly the netting the cell structure forbids. The VIEW ON-LEDGER block links to the official XRPL Foundation explorer — including the **issuer account** pages whose on-ledger obligations *are* the issued balance, so you can click straight through to the treasury, not just the attestation transaction.
 
 ## Use — unsafe-override (ad-hoc verification of an unregistered tenant)
 
@@ -107,7 +110,7 @@ bipcircle-verify \
   --unsafe-issuer rExampleIssuerAccount...
 ```
 
-For tenants not yet in the verifier's pinned registry. Operator accepts the trust-anchor responsibility. Both the URL and the issuer address need to come from a trusted out-of-band source (DPA, GFSC registry, etc.). On-chain supply check is skipped in this mode (no token-contract config available).
+For tenants not yet in the verifier's pinned registry. Operator accepts the trust-anchor responsibility. Both the URL and the issuer address need to come from a trusted out-of-band source (DPA, GFSC registry, etc.). The on-chain supply check cannot run in this mode (no token-contract config available), so the best verdict it can produce is `INCONCLUSIVE` (exit 3) — the integrity stages are verified, the reserve backing is not.
 
 ## After PASS — inspect the treasury on-ledger
 
@@ -120,7 +123,7 @@ On an interactive terminal the CLI offers a press-Enter prompt that opens the at
 
 The explorer page lets you independently confirm the tx's `Account`, `Memos`, `Sequence`, and ledger-validation state without any platform infrastructure in the loop, useful as a cross-check that the verifier and the XRPL ledger agree.
 
-Exit codes: `0` PASS, `1` FAIL, `2` invocation error. `--json` for machine-readable output (suppresses the explorer prompt regardless of `--no-open`).
+Exit codes: `0` PASS, `1` FAIL, `2` invocation error, `3` INCONCLUSIVE (no check failed, but at least one required check could not be performed — skipped stage, missing token config, unresolvable cell currency; never treat it as PASS). `--json` for machine-readable output (suppresses the explorer prompt regardless of `--no-open`).
 
 ## All flags
 
@@ -133,7 +136,7 @@ Exit codes: `0` PASS, `1` FAIL, `2` invocation error. `--json` for machine-reada
 | `--network <name>` | `mainnet` (default) or `testnet`. |
 | `--rpc-url <url>` | Override the XRPL JSON-RPC endpoint. |
 | `--eth-rpc-url <url>` | Ethereum JSON-RPC endpoint for the on-chain supply stage. Required when the tenant's token chain is `ethereum`, unless `--skip-onchain` is set. |
-| `--skip-onchain` | Skip the on-chain supply comparison stage. |
+| `--skip-onchain` | Skip the on-chain supply comparison stage. The verdict then reports `INCONCLUSIVE` (exit 3), never `PASS`. |
 | `--no-open` | Don't prompt to open the XRPL explorer after a PASS. |
 | `--json` | Output the full structured result as JSON. |
 | `--help`, `-h` | Show CLI help. |
@@ -147,9 +150,9 @@ Exit codes: `0` PASS, `1` FAIL, `2` invocation error. `--json` for machine-reada
 5. **Bank-service JWKS** — fetches `/.well-known/bank-service-keys` from the **pinned** bankServiceUrl. Validates every advertised `kid` matches the tenant's `kidPattern`. Rejects duplicate kids; pins `alg=ES256`.
 6. **Seal signatures** — for every seal in the witness, decodes the canonical input and ECDSA-verifies the signature against the matching public key.
 7. **Merkle root** — re-builds the Merkle root from leaf digests; compares to Memo 5's anchored root.
-8. **On-chain supply** — fetches token `totalSupply()` from the chain in the tenant registry; compares to the sum of bank-side balances. Reports `match: ✓` or `SHORTFALL: N minor units`. Skipped if `--skip-onchain` is set.
+8. **On-chain supply, per currency cell** — groups the tenant's tokens by their cell currency (`reserveCurrency`), then for EACH cell fetches the tokens' on-chain supplies and compares their sum to the bank-side balances **in that currency only**. Reports `✓ fully backed` or `RESERVE_SHORTFALL[<currency>]` per cell. Tolerances never cross a cell boundary. Several accounts at one bank each count once (dedup key is currency + provider + account reference). If this stage is skipped (`--skip-onchain`), has no token config, or a token's cell currency cannot be resolved, the verdict is `INCONCLUSIVE` — never `PASS`.
 
-Every stage produces a structured failure record on FAIL. `--json` gives the full diff.
+Every stage produces a structured failure record on FAIL, and every check that could not be performed produces an entry in `result.inconclusive`. `--json` gives the full diff.
 
 ## Trust model
 
@@ -220,7 +223,7 @@ Tenants are pinned in source: every release embeds the registry available at rel
    }
    ```
 
-   The verifier checks every token's on-chain supply and compares the SUM against the bank-side reserves. Per-token supplies are reported individually so a reviewer can see which chain contributes how much of the liability.
+   Every token entry should carry `reserveCurrency` — the fiat currency of the legally segregated cell the token belongs to. The verifier groups tokens by `reserveCurrency` and verifies each cell's summed supply against ONLY that currency's bank reserves; per-token supplies are reported individually so a reviewer can see which chain contributes how much of each cell's liability. `currency` keeps its per-chain meaning: fiat denomination for `ethereum` tokens (used as a legacy `reserveCurrency` fallback), on-ledger ticker for `xrpl` tokens (used for `gateway_balances` — never a cell key, so `reserveCurrency` is REQUIRED there). A token with no resolvable cell currency makes the verdict `INCONCLUSIVE`.
 
    The older `token` (single object) shape is still accepted on read for back-compat. New entries should use `tokens[]`.
 
@@ -266,6 +269,16 @@ MIT — see [LICENSE](./LICENSE).
   treasury balance (XRPL `gateway_balances` + ETH `totalSupply`) and links to the raw ledger
   (attestation account + token issuer accounts). The CLI now also prints the hosted page URL
   (`web verifier:` line) so it's discoverable. Gives a shareable, no-install URL for treasury verification.
+
+- **v0.5.0** — **BREAKING**: per-currency-cell verification + three-state verdict (protected-cell-company audit 2026-07-29, findings 2/3/4/5/18/19):
+  - **Cells never net (finding 2).** The issuer is a protected cell company: one fiat currency per cell, legally segregated. Tokens are grouped by `reserveCurrency` and each cell's supply is verified against ONLY that currency's reserves. Pre-0.5.0 an EUR surplus could silently cover a GBP shortfall and print PASS; the same input now FAILs with `RESERVE_SHORTFALL[GBP]`.
+  - **`INCONCLUSIVE` verdict + exit code 3 (finding 4).** A verdict can no longer become PASS through absence: `--skip-onchain`, a zero-token registry entry, unsafe-override mode, and an unresolvable cell currency (finding 5) all yield `INCONCLUSIVE`, never PASS. New `result.inconclusive[]` lists every check that could not be performed.
+  - **Multi-bank accounts count correctly (finding 3).** The reserve dedup key now includes the seal's signed account reference (`bankAccountId`/`accountId`/`connectionId`), so several accounts at one institution each contribute their latest balance instead of collapsing to one (which manufactured a false FAIL). Legacy seals without an account reference behave exactly as before; a provider mixing referenced and unreferenced seals is refused (`POR-MULTIBANK-ACCOUNT-01`).
+  - **Mixed decimals no longer throw (finding 18).** Cell decimals are the max across the cell's tokens, so every rebase multiplies up — the `RangeError` on a lower-decimal base token is gone.
+  - **Tolerance is a cell property (finding 19).** A token's `toleranceMinorUnits` applies inside its own cell only; multiple declarations in one cell take the strictest.
+  - **Witness protocol `v3` accepted** (same RFC-6962 tree as v2; balance seals may carry an account reference). Pre-0.5.0 verifiers refuse v3 loudly rather than mis-summing — `SUPPORTED_PROTOCOL_VERSIONS` is the protocol's fail-closed evolution lever.
+  - **Breaking surface**: `result.stages.supply` is now `{ ok, cellCount, tokenCount, cells[] }` (was a flat single-currency comparison); `--skip-onchain` and unsafe-override runs exit 3 instead of 0; verdicts are three-state. Published v1/v2 witnesses for single-cell tenants verify with identical verdicts.
+  - 63 tests (up from 47), including end-to-end regression pins for each audit finding.
 
 Reproducible builds (bit-identical output) remain a later target.
 

@@ -73,15 +73,16 @@ export function computeMerkleRootV2(leafHexDigests) {
 
 /**
  * Dispatch the right Merkle algorithm for a witness's protocolVersion.
- * 'v2' → computeMerkleRootV2 (RFC-6962); anything else (v1 / absent) → v1.
- * Centralised so index.js and any future caller cannot drift.
+ * 'v2' / 'v3' → computeMerkleRootV2 (RFC-6962 — v3 changes the seal payload
+ * semantics for multi-bank accounts, not the tree); anything else (v1 /
+ * absent) → v1. Centralised so index.js and any future caller cannot drift.
  *
  * @param {string[]} leafHexDigests
  * @param {string|undefined} protocolVersion — witness.protocolVersion
  * @returns {string|null}
  */
 export function computeMerkleRootForVersion(leafHexDigests, protocolVersion) {
-  return protocolVersion === 'v2'
+  return (protocolVersion === 'v2' || protocolVersion === 'v3')
     ? computeMerkleRootV2(leafHexDigests)
     : computeMerkleRoot(leafHexDigests);
 }

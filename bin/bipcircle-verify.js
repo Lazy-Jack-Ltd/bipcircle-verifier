@@ -79,7 +79,7 @@ function parseArgs(argv) {
 function printHelp() {
   let registeredIds = [];
   try { registeredIds = listTenantIds(); } catch (e) { /* registry missing — handled in verify */ }
-  process.stdout.write(`bipcircle-verify — public-reserve-verifier protocol v1
+  process.stdout.write(`bipcircle-verify — public-reserve-verifier (witness protocols v1-v3, per-currency-cell)
 
 USAGE (pinned tenant, preferred):
   bipcircle-verify --xrpl-tx <hash> --tenant <tenantId>
@@ -97,15 +97,21 @@ OPTIONS:
   --eth-rpc-url <url>        Ethereum JSON-RPC for the on-chain supply
                              stage (required when the tenant's token
                              config is chain='ethereum')
-  --skip-onchain             Skip the on-chain supply comparison stage
+  --skip-onchain             Skip the on-chain supply comparison stage.
+                             The verdict then reports INCONCLUSIVE, not
+                             PASS — a skipped check is not a passed check
   --no-open                  Don't prompt to open the XRPL explorer
   --json                     Output the full structured result as JSON
   -h, --help                 Show this help
 
 EXIT CODES:
-  0   VERDICT: PASS
-  1   VERDICT: FAIL
+  0   VERDICT: PASS          every check ran and held, per currency cell
+  1   VERDICT: FAIL          at least one check failed
   2   invocation error
+  3   VERDICT: INCONCLUSIVE  no check failed, but at least one required
+                             check could not be performed (skipped stage,
+                             missing token config, unresolvable cell
+                             currency). Never treat as PASS.
 
 PROTOCOL:
   https://github.com/Lazy-Jack-Ltd/bipcircle/blob/main/Documentation/architecture/public-reserve-verifier-protocol.md
@@ -155,7 +161,11 @@ async function main() {
     }
   }
 
-  process.exit(result.verdict === 'PASS' ? 0 : 1);
+  // 0 = PASS, 1 = FAIL, 3 = INCONCLUSIVE (2 is reserved for invocation
+  // errors). INCONCLUSIVE is deliberately non-zero: automation keying on
+  // "exit 0 == verified" stays safe, and a check that never ran can never
+  // read as a PASS.
+  process.exit(result.verdict === 'PASS' ? 0 : result.verdict === 'INCONCLUSIVE' ? 3 : 1);
 }
 
 main().catch((err) => {

@@ -107,13 +107,21 @@ function makeFixtureWorld({
     },
   };
 
-  const fetchImpl = async (url) => {
+  const fetchImpl = async (url, opts) => {
     if (typeof url === 'string' && url.includes('.well-known/bank-service-keys')) {
       return { ok: true, json: async () => jwks };
     }
     if (url === WITNESS_URL) {
       const b = Buffer.from(witnessJson, 'utf8');
       return { ok: true, arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) };
+    }
+    // JSON-RPC dispatch: the supply stage issues gateway_balances calls for
+    // xrpl tokens; everything else is the attestation tx lookup.
+    let body = {};
+    try { body = JSON.parse(opts?.body || '{}'); } catch { /* not JSON */ }
+    if (body.method === 'gateway_balances') {
+      // 1,000 TVV outstanding — comfortably under the ~£3k of seals.
+      return { ok: true, json: async () => ({ result: { obligations: { TVV: '1000' } } }) };
     }
     return { ok: true, json: async () => xrplTx };
   };
@@ -129,24 +137,35 @@ beforeEach(() => {
       bankServiceUrl: BANK_URL,
       xrplIssuerAddress: ISSUER,
       kidPattern: KID_PATTERN,
-      token: null,
+      // v0.5.0: a PASS requires the supply stage to actually run, so the
+      // fixture registry carries a real token. The fixture world stubs
+      // gateway_balances at 1,000 TVV against ~£1,003 of GBP seals.
+      tokens: [{
+        label: 'TVV-XRPL', chain: 'xrpl', issuer: ISSUER,
+        currency: 'TVV', decimals: 2, reserveCurrency: 'GBP',
+      }],
     }],
   });
 });
 
 describe('verify — pinned-tenant happy path', () => {
-  test('PASS when everything aligns with the pinned registry', async () => {
+  test('PASS when everything aligns with the pinned registry (supply stage RUNS)', async () => {
     const world = makeFixtureWorld();
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl });
-    assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures, null, 2)}`);
+    assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures, null, 2)} inconclusive: ${JSON.stringify(r.inconclusive, null, 2)}`);
     assert.equal(r.mode, 'registered-tenant');
     assert.equal(r.stages.signatures.sealsVerified, 3);
     assert.equal(r.stages.merkle.ok, true);
+    // PASS is only ever emitted off a fully-executed supply stage.
+    assert.equal(r.stages.supply.ok, true);
+    assert.equal(r.stages.supply.cells.length, 1);
+    assert.equal(r.stages.supply.cells[0].currency, 'GBP');
+    assert.equal(r.inconclusive.length, 0);
   });
 });
 
 describe('verify — unsafe-override mode', () => {
-  test('PASS with explicit URL + issuer + no registry entry needed', async () => {
+  test('INCONCLUSIVE (not PASS) — no pinned token config, so the reserve check cannot run', async () => {
     resetRegistry();
     setRegistryForTests({ tenants: [] });
     const world = makeFixtureWorld();
@@ -156,8 +175,12 @@ describe('verify — unsafe-override mode', () => {
       xrplIssuerAddress: ISSUER,
       fetchImpl: world.fetchImpl,
     });
-    assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures, null, 2)}`);
+    // Integrity stages all pass, but the supply check never ran — the
+    // verdict must say so rather than claim PASS (audit finding 4).
+    assert.equal(r.verdict, 'INCONCLUSIVE', `failures: ${JSON.stringify(r.failures, null, 2)}`);
+    assert.equal(r.failures.length, 0);
     assert.equal(r.mode, 'unsafe-override');
+    assert.ok(r.inconclusive.some((f) => /SUPPLY_CHECK_NOT_RUN/.test(f.reason)));
   });
 });
 

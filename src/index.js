@@ -27,10 +27,15 @@
  *   4. verifySealSignatures — ECDSA-verify each seal.
  *   5. computeMerkleRoot — rebuild root from leaves; compare to
  *      witness's claimed root.
- *   6. On-chain supply comparison (v0.1.2 — wired in via the
- *      tenant registry's token config).
+ *   6. On-chain supply comparison, per currency cell (v0.5.0 — the
+ *      issuer is a protected cell company; each cell holds one fiat
+ *      currency and is legally segregated, so every cell is verified
+ *      against ONLY its own currency's bank reserves).
  *
- * Returns a structured PASS / FAIL with per-stage diff.
+ * Returns a structured PASS / FAIL / INCONCLUSIVE with per-stage diff.
+ * INCONCLUSIVE (v0.5.0) means at least one check could not be performed
+ * (skipped stage, missing token config, unresolvable cell currency) —
+ * a verifier must never say PASS for a check it did not run.
  */
 
 'use strict';
@@ -44,10 +49,37 @@ import { lookupTenant } from './tenantRegistry.js';
 import {
   getEthereumErc20TotalSupply,
   getXrplIssuedSupply,
-  sumBankReserves,
+  sumBankReservesDetailed,
   compareReservesVsSupply,
   decimalStringToMinorUnits,
 } from './onchain.js';
+
+/**
+ * Resolve the fiat currency of the CELL a token belongs to.
+ *
+ * The issuer is a protected cell company: each cell holds exactly one fiat
+ * currency and is legally segregated, so the cell currency is the boundary
+ * every reserve comparison must respect.
+ *
+ *   - `reserveCurrency` (explicit, preferred — registry schema v3)
+ *   - legacy fallback: for ethereum tokens, `currency` has always been the
+ *     fiat denomination (e.g. 'GBP'), so it is a safe cell key
+ *   - XRPL tokens' `currency` is the ON-LEDGER TICKER (e.g. 'TVV'), never a
+ *     fiat currency — no fallback. Missing reserveCurrency on an XRPL token
+ *     resolves to null and the verdict becomes INCONCLUSIVE (fail-closed):
+ *     an unassignable token must never silently vanish from the liability.
+ *
+ * @returns {string|null}
+ */
+function resolveCellCurrency(tok) {
+  if (typeof tok.reserveCurrency === 'string' && tok.reserveCurrency.trim().length > 0) {
+    return tok.reserveCurrency.trim();
+  }
+  if (tok.chain === 'ethereum' && typeof tok.currency === 'string' && tok.currency.trim().length > 0) {
+    return tok.currency.trim();
+  }
+  return null;
+}
 
 export async function verify({
   txHash,
@@ -65,6 +97,11 @@ export async function verify({
     mode: null,
     stages: {},
     failures: [],
+    // v0.5.0: checks that could NOT be performed. A non-empty list means the
+    // verdict can never be PASS — it becomes INCONCLUSIVE (unless something
+    // else already made it FAIL). A verifier must never say PASS for a check
+    // it did not run.
+    inconclusive: [],
   };
 
   // Resolve trust roots from the tenant registry OR explicit override.
@@ -226,121 +263,192 @@ export async function verify({
     });
   }
 
-  // Stage 6: on-chain supply comparison — multi-token aware.
+  // Stage 6: on-chain supply comparison — PER CURRENCY CELL (v0.5.0).
   //
-  // For tenants with multiple tokens across chains (e.g. tvvin holding
-  // both ETH-TVV and XRPL-TVV against the same GBP bank reserves) the
-  // verifier sums the on-chain supplies across all configured tokens
-  // and compares the total against the reserves. The reserves stay
-  // single-currency on the bank side (one GBP holding account); the
-  // liability is split across products.
+  // The issuer is a protected cell company. Each cell holds ONE fiat currency
+  // and is legally segregated: cell A's surplus can never cover cell B's
+  // shortfall — that segregation is the point of the structure, and checking
+  // it is why this tool exists. Tokens are therefore grouped by their cell
+  // currency (resolveCellCurrency) and EVERY cell is verified against ONLY
+  // its own currency's bank reserves. Pre-0.5.0 releases summed all tokens'
+  // supplies into one pot and compared it against one currency's reserves —
+  // a EUR surplus could silently pay for a GBP shortfall.
   //
-  // Per-token supplies are reported individually under
-  // result.stages.supply.perToken[] so a reviewer can see which chain
-  // contributes how much of the liability.
-  if (!skipOnChainSupply && trustRoots.tokens.length > 0) {
-    try {
-      // Reserves: use decimals from the first ethereum token if present
-      // (T-REX 18-dec default), else from the first token. Bank reserves
-      // are denominated in the fiat currency, scaled to minor units.
-      const baseToken = trustRoots.tokens.find((t) => t.chain === 'ethereum') ?? trustRoots.tokens[0];
-      const baseDecimals = baseToken?.decimals ?? 2;
-      // The bank reserve is the fiat backing — its currency is the fiat denomination of the base token
-      // (e.g. the ETH T-REX token's `currency: 'GBP'`), not an on-ledger ticker like 'TVV'.
-      const reservesCurrency = baseToken?.currency ?? '';
-      // POR-RESERVE-DOUBLECOUNT-01: pass the reserves currency so only matching
-      // balances are summed, and the per-account dedup runs (was unfiltered +
-      // double-counting intra-day reads).
-      // POR-SEAL-FRESHNESS-01: gate every summed seal to the witness date + the
-      // balance endpoint, so a stale/replayed or wrong-endpoint seal cannot back a
-      // live supply (attest-then-drain-then-replay). asOfDate is the witness date;
-      // the producer enforces same-day seals, so the 48h window only rejects
-      // genuinely stale seals.
-      const reservesMinor = sumBankReserves(witness.seals, baseDecimals, reservesCurrency, {
-        asOfDate: witness.asOfDate,
-        maxSealAgeHours: 48,
-        expectedEndpoint: '/v1/balance',
-      });
-
-      const perToken = [];
-      let totalSupplyMinor = 0n;
-      for (const tok of trustRoots.tokens) {
-        let supplyMinor;
-        if (tok.chain === 'ethereum') {
-          if (!ethRpcUrl) {
-            throw new Error('ethRpcUrl required for ethereum-chain on-chain check (pass --eth-rpc-url)');
-          }
-          supplyMinor = await getEthereumErc20TotalSupply({
-            rpcUrl: ethRpcUrl,
-            contractAddress: tok.contract,
-            fetchImpl,
-          });
-        } else if (tok.chain === 'xrpl') {
-          const xrplRpc = rpcUrl || (network === 'mainnet'
-            ? 'https://s1.ripple.com:51234/'
-            : 'https://s.altnet.rippletest.net:51234/');
-          const supplyStr = await getXrplIssuedSupply({
-            rpcUrl: xrplRpc,
-            issuerAddress: tok.issuer,
-            currencyCode: tok.currency,
-            fetchImpl,
-          });
-          supplyMinor = decimalStringToMinorUnits(supplyStr, tok.decimals);
-        } else {
-          throw new Error(`unknown chain '${tok.chain}' in tenant registry`);
-        }
-        // Rebase per-token supply to the common reserves decimals so
-        // sums are like-for-like. Eth 18-dec stays as is when base is
-        // 18; XRPL 0-dec gets multiplied up.
-        const rebased = tok.decimals === baseDecimals
-          ? supplyMinor
-          : supplyMinor * (10n ** BigInt(baseDecimals - tok.decimals));
-        perToken.push({
-          label: tok.label || `${tok.currency}-${tok.chain}`,
-          chain: tok.chain,
-          currency: tok.currency,
-          decimals: tok.decimals,
-          issuer: tok.issuer ?? null,     // XRPL issuer account (its obligations = the on-ledger balance)
-          contract: tok.contract ?? null, // ETH token contract
-          supplyMinor: supplyMinor.toString(),
-          rebasedToReservesMinor: rebased.toString(),
-        });
-        totalSupplyMinor += rebased;
-      }
-
-      const tolerance = trustRoots.tokens.find((t) => t.toleranceMinorUnits)
-        ? BigInt(trustRoots.tokens.find((t) => t.toleranceMinorUnits).toleranceMinorUnits)
-        : 0n;
-      const cmp = compareReservesVsSupply({
-        reservesMinorUnits: reservesMinor,
-        onChainSupplyMinorUnits: totalSupplyMinor,
-        toleranceMinorUnits: tolerance,
-      });
-      result.stages.supply = {
-        ok: cmp.ok,
-        ...cmp,
-        reservesDecimals: baseDecimals,
-        reservesCurrency,
-        perToken,
-        tokenCount: trustRoots.tokens.length,
-      };
-      if (!cmp.ok) {
-        result.failures.push({
-          stage: 'supply',
-          reason: `RESERVE_SHORTFALL: reserves=${cmp.reservesMinorUnits} < total on-chain supply=${cmp.onChainSupplyMinorUnits} across ${trustRoots.tokens.length} tokens (shortfall=${cmp.shortfallMinorUnits} minor units)`,
-        });
-      }
-    } catch (err) {
-      result.failures.push({ stage: 'supply', reason: err.message });
-    }
-  } else if (skipOnChainSupply || trustRoots.tokens.length === 0) {
+  // The verdict can never become PASS through absence:
+  //   - --skip-onchain            → INCONCLUSIVE, never PASS
+  //   - zero tokens configured    → INCONCLUSIVE (registry gap ≠ verified)
+  //   - unsafe-override mode      → INCONCLUSIVE (no pinned token config)
+  //   - unresolvable cell currency→ INCONCLUSIVE (token can't vanish silently)
+  // A genuine reserve shortfall in ANY cell → FAIL.
+  if (skipOnChainSupply) {
+    result.stages.supply = { ok: null, skipped: true, reason: 'skipped by flag (--skip-onchain)' };
+    result.inconclusive.push({
+      stage: 'supply',
+      reason: 'SUPPLY_CHECK_SKIPPED: the on-chain supply vs bank-reserve comparison was skipped (--skip-onchain). Reserve backing was NOT verified, so the verdict cannot be PASS.',
+    });
+  } else if (trustRoots.tokens.length === 0) {
     result.stages.supply = {
       ok: null,
       skipped: true,
-      reason: skipOnChainSupply ? 'flag' : 'no tokens configured for tenant (or unsafe-override mode)',
+      reason: result.mode === 'unsafe-override'
+        ? 'unsafe-override mode has no pinned token config'
+        : 'no tokens configured for this tenant in the pinned registry',
+    };
+    result.inconclusive.push({
+      stage: 'supply',
+      reason: 'SUPPLY_CHECK_NOT_RUN: no token configuration was available, so the reserve backing of the on-chain supply was NOT verified. A missing registry entry must not read as a verified reserve.',
+    });
+  } else {
+    // Group tokens into currency cells. A token whose cell currency cannot
+    // be resolved is surfaced as INCONCLUSIVE — it must not be silently
+    // dropped from the liability, and it must not be guessed into a cell.
+    const cellsByCurrency = new Map();
+    for (const tok of trustRoots.tokens) {
+      const cellCurrency = resolveCellCurrency(tok);
+      if (!cellCurrency) {
+        result.inconclusive.push({
+          stage: 'supply',
+          reason: `CELL_CURRENCY_UNRESOLVED: token '${tok.label || `${tok.currency}-${tok.chain}`}' has no reserveCurrency (and no legacy fiat fallback), so its liability could not be assigned to a currency cell and was NOT verified.`,
+        });
+        continue;
+      }
+      if (!cellsByCurrency.has(cellCurrency)) cellsByCurrency.set(cellCurrency, []);
+      cellsByCurrency.get(cellCurrency).push(tok);
+    }
+
+    const cells = [];
+    for (const [cellCurrency, cellTokens] of cellsByCurrency) {
+      try {
+        const badDecimals = cellTokens.find(
+          (t) => !Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 18,
+        );
+        if (badDecimals) {
+          result.inconclusive.push({
+            stage: 'supply',
+            reason: `CELL_CONFIG_INVALID[${cellCurrency}]: token '${badDecimals.label || badDecimals.contract || badDecimals.issuer}' has invalid decimals (${JSON.stringify(badDecimals.decimals)}); the ${cellCurrency} cell was NOT verified.`,
+          });
+          continue;
+        }
+        // Cell decimals = the max across the cell's tokens, so every rebase
+        // multiplies UP (exponent >= 0). Pre-0.5.0 used the first ethereum
+        // token's decimals as the base, which threw RangeError (negative
+        // BigInt exponent) whenever the base had fewer decimals than a
+        // sibling token.
+        const cellDecimals = Math.max(...cellTokens.map((t) => t.decimals));
+
+        // POR-RESERVE-DOUBLECOUNT-01 + POR-SEAL-FRESHNESS-01 gates unchanged;
+        // the currency filter is now ALWAYS a non-empty cell currency, so a
+        // missing registry field can no longer switch the filter off.
+        const reserves = sumBankReservesDetailed(witness.seals, cellDecimals, cellCurrency, {
+          asOfDate: witness.asOfDate,
+          maxSealAgeHours: 48,
+          expectedEndpoint: '/v1/balance',
+        });
+
+        const perToken = [];
+        let cellSupplyMinor = 0n;
+        for (const tok of cellTokens) {
+          let supplyMinor;
+          if (tok.chain === 'ethereum') {
+            if (!ethRpcUrl) {
+              throw new Error('ethRpcUrl required for ethereum-chain on-chain check (pass --eth-rpc-url)');
+            }
+            supplyMinor = await getEthereumErc20TotalSupply({
+              rpcUrl: ethRpcUrl,
+              contractAddress: tok.contract,
+              fetchImpl,
+            });
+          } else if (tok.chain === 'xrpl') {
+            const xrplRpc = rpcUrl || (network === 'mainnet'
+              ? 'https://s1.ripple.com:51234/'
+              : 'https://s.altnet.rippletest.net:51234/');
+            const supplyStr = await getXrplIssuedSupply({
+              rpcUrl: xrplRpc,
+              issuerAddress: tok.issuer,
+              currencyCode: tok.currency,
+              fetchImpl,
+            });
+            supplyMinor = decimalStringToMinorUnits(supplyStr, tok.decimals);
+          } else {
+            throw new Error(`unknown chain '${tok.chain}' in tenant registry`);
+          }
+          // Rebase to the cell decimals — exponent is provably >= 0.
+          const rebased = tok.decimals === cellDecimals
+            ? supplyMinor
+            : supplyMinor * (10n ** BigInt(cellDecimals - tok.decimals));
+          perToken.push({
+            label: tok.label || `${tok.currency}-${tok.chain}`,
+            chain: tok.chain,
+            currency: tok.currency,
+            cellCurrency,
+            decimals: tok.decimals,
+            issuer: tok.issuer ?? null,     // XRPL issuer account (its obligations = the on-ledger balance)
+            contract: tok.contract ?? null, // ETH token contract
+            supplyMinor: supplyMinor.toString(),
+            rebasedToCellMinor: rebased.toString(),
+          });
+          cellSupplyMinor += rebased;
+        }
+
+        // Tolerance is a CELL property and never crosses a cell boundary.
+        // Declared per-token values are interpreted at the declaring token's
+        // decimals, rebased to the cell decimals; if several tokens in one
+        // cell declare different values the STRICTEST (smallest) wins — a
+        // registry mistake must never widen the tolerance.
+        const declaredTolerances = cellTokens
+          .filter((t) => t.toleranceMinorUnits !== undefined && t.toleranceMinorUnits !== null)
+          .map((t) => BigInt(t.toleranceMinorUnits) * (10n ** BigInt(cellDecimals - t.decimals)));
+        const tolerance = declaredTolerances.length > 0
+          ? declaredTolerances.reduce((a, b) => (b < a ? b : a))
+          : 0n;
+
+        const cmp = compareReservesVsSupply({
+          reservesMinorUnits: reserves.totalMinorUnits,
+          onChainSupplyMinorUnits: cellSupplyMinor,
+          toleranceMinorUnits: tolerance,
+        });
+        cells.push({
+          currency: cellCurrency,
+          decimals: cellDecimals,
+          ok: cmp.ok,
+          ...cmp,
+          toleranceMinorUnits: tolerance.toString(),
+          reserveAccountCount: reserves.accountCount,
+          reserveSealCount: reserves.matchedSealCount,
+          perToken,
+        });
+        if (!cmp.ok) {
+          const noEvidence = reserves.accountCount === 0
+            ? ' No balance seal for this currency appears in the witness — either a genuine zero reserve or missing evidence; both must FAIL.'
+            : '';
+          result.failures.push({
+            stage: 'supply',
+            reason: `RESERVE_SHORTFALL[${cellCurrency}]: reserves=${cmp.reservesMinorUnits} < on-chain supply=${cmp.onChainSupplyMinorUnits} for the ${cellCurrency} cell (shortfall=${cmp.shortfallMinorUnits} minor units at ${cellDecimals}dp). Cells are legally segregated — no other currency's surplus can cover this.${noEvidence}`,
+          });
+        }
+      } catch (err) {
+        result.failures.push({ stage: 'supply', reason: `[cell ${cellCurrency}] ${err.message}` });
+      }
+    }
+
+    const anyCellFailed = result.failures.some((f) => f.stage === 'supply');
+    const anyCellInconclusive = result.inconclusive.some((f) => f.stage === 'supply');
+    result.stages.supply = {
+      ok: anyCellFailed ? false : (anyCellInconclusive ? null : true),
+      cellCount: cells.length,
+      tokenCount: trustRoots.tokens.length,
+      cells,
     };
   }
 
-  result.verdict = result.failures.length === 0 ? 'PASS' : 'FAIL';
+  // Verdict precedence: any failure → FAIL; else any unperformed check →
+  // INCONCLUSIVE; only a fully-executed, fully-clean run → PASS.
+  if (result.failures.length > 0) {
+    result.verdict = 'FAIL';
+  } else if (result.inconclusive.length > 0) {
+    result.verdict = 'INCONCLUSIVE';
+  } else {
+    result.verdict = 'PASS';
+  }
   return result;
 }
