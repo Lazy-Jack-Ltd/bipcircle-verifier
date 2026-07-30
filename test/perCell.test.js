@@ -37,11 +37,28 @@ const GBP_CONTRACT = `0x${'bb'.repeat(20)}`;
 const GBP18_CONTRACT = `0x${'cc'.repeat(20)}`;
 
 /**
- * Build a fully-signed world: seals -> witness -> Memo 5 tx -> stub fetch.
- * sealSpecs entries are merged into the balance payload (provider, currency,
- * availableBalance, optional bankAccountId, ...).
+ * The eleven-field Memo 1 canonical record exactly as the producer's
+ * buildCanonicalRecord emits it (major-unit figures as strings; the literal
+ * 'null' = "this view was never committed", which is NOT zero). Every real
+ * attestation transaction since 2026-05-23 carries this memo alongside
+ * Memo 5, so the fixture worlds carry one too (v0.6.0 binds the verdict to
+ * the cell it names).
  */
-function makeWorld({ sealSpecs, ethSupplies = {}, xrplObligations = {}, protocolVersion = 'v1' }) {
+function rec(chain, tokenKey, currency, {
+  version = 'v2', verdict = 'balanced',
+  onChain = 'null', ledger = 'null', bank = 'null', delta = 'null',
+} = {}) {
+  return [version, DATE, chain, tokenKey, currency, verdict, onChain, ledger, bank, delta,
+    `${DATE}_${TENANT}_${chain}_${tokenKey}`].join('|');
+}
+
+/**
+ * Build a fully-signed world: seals -> witness -> Memo 1 + Memo 5 tx -> stub
+ * fetch. sealSpecs entries are merged into the balance payload (provider,
+ * currency, availableBalance, optional bankAccountId, ...). canonicalRecord
+ * is the Memo 1 payload (build with rec()); null omits the memo entirely.
+ */
+function makeWorld({ sealSpecs, ethSupplies = {}, xrplObligations = {}, protocolVersion = 'v1', canonicalRecord = null }) {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const seals = [];
   const leaves = [];
@@ -63,7 +80,11 @@ function makeWorld({ sealSpecs, ethSupplies = {}, xrplObligations = {}, protocol
   const jwks = { keys: [{ kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, use: 'sig', alg: 'ES256', kid: KID }] };
   const memo5 = { protocolVersion, sealMerkleRoot, witnessSha256, bankServicePublicKeyId: KID, sealCount: seals.length, witnessUrl: WITNESS_URL };
   const hex = (s) => Buffer.from(s, 'utf8').toString('hex').toUpperCase();
-  const xrplTx = { result: { Account: ISSUER, ledger_index: 12345, Memos: [{ Memo: { MemoType: hex('reserve-verifier-v1'), MemoData: hex(JSON.stringify(memo5)) } }] } };
+  const memos = [
+    ...(canonicalRecord ? [{ Memo: { MemoType: hex('treasury-attestation-v1'), MemoData: hex(canonicalRecord) } }] : []),
+    { Memo: { MemoType: hex('reserve-verifier-v1'), MemoData: hex(JSON.stringify(memo5)) } },
+  ];
+  const xrplTx = { result: { Account: ISSUER, ledger_index: 12345, Memos: memos } };
 
   const fetchImpl = async (url, opts) => {
     if (typeof url === 'string' && url.includes('.well-known/bank-service-keys')) {
@@ -106,33 +127,47 @@ describe('finding 2 — a cell is verified against ITS OWN reserves only (no cro
   ];
   const ethSupplies = { [EUR_CONTRACT]: 10000n, [GBP_CONTRACT]: 100000000n };    // EUR 100, GBP 1,000,000
 
-  test('FAIL: an EUR surplus must NOT cover a GBP £500,000 shortfall (pre-0.5.0 false PASS)', async () => {
+  test('FAIL: a GBP-cell tx must FAIL on its £500,000 shortfall — an EUR surplus in the same witness cannot cover it (pre-0.5.0 false PASS)', async () => {
     setRegistry(tokens);
-    const world = makeWorld({ sealSpecs, ethSupplies });
+    const world = makeWorld({ sealSpecs, ethSupplies, canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP') });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'FAIL');
     assert.ok(r.failures.some((f) => /RESERVE_SHORTFALL\[GBP\]/.test(f.reason)),
       `expected a GBP-cell shortfall, got: ${JSON.stringify(r.failures)}`);
-    const gbp = r.stages.supply.cells.find((c) => c.currency === 'GBP');
-    const eur = r.stages.supply.cells.find((c) => c.currency === 'EUR');
+    // v0.6.0 — the check is SCOPED to the cell the tx's record names.
+    assert.equal(r.stages.supply.verifiedCell, 'GBP');
+    assert.equal(r.stages.supply.cells.length, 1);
+    const gbp = r.stages.supply.cells[0];
     assert.equal(gbp.ok, false);
     assert.equal(gbp.shortfallMinorUnits, '50000000'); // £500,000.00 short
-    assert.equal(eur.ok, true);                        // the EUR cell itself is healthy
   });
 
-  test('PASS when EVERY cell is individually backed', async () => {
+  test('v0.6.0 — an EUR-cell tx against the SAME world answers for the EUR cell: PASS (no longer byte-identical to the GBP tx)', async () => {
     setRegistry(tokens);
-    const world = makeWorld({
-      sealSpecs: [
-        { provider: 'clearbank', currency: 'EUR', availableBalance: '100.00' },
-        { provider: 'clearbank', currency: 'GBP', availableBalance: '1000000.00' },
-      ],
-      ethSupplies,
-    });
+    const world = makeWorld({ sealSpecs, ethSupplies, canonicalRecord: rec('ethereum-sepolia', EUR_CONTRACT, 'EUR') });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
+    // The EUR cell is genuinely healthy; the GBP shortfall belongs to the
+    // GBP cell's OWN transaction (previous test). Cells are legally
+    // segregated — each verdict speaks for the cell its tx names.
     assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures)} inconclusive: ${JSON.stringify(r.inconclusive)}`);
-    assert.equal(r.stages.supply.cells.length, 2);
-    assert.ok(r.stages.supply.cells.every((c) => c.ok));
+    assert.equal(r.stages.supply.verifiedCell, 'EUR');
+    assert.equal(r.stages.supply.cells.length, 1);
+    assert.equal(r.stages.supply.cells[0].ok, true);
+  });
+
+  test('PASS when the named cell is individually backed', async () => {
+    setRegistry(tokens);
+    const healthySeals = [
+      { provider: 'clearbank', currency: 'EUR', availableBalance: '100.00' },
+      { provider: 'clearbank', currency: 'GBP', availableBalance: '1000000.00' },
+    ];
+    for (const [tokenKey, cell] of [[GBP_CONTRACT, 'GBP'], [EUR_CONTRACT, 'EUR']]) {
+      const world = makeWorld({ sealSpecs: healthySeals, ethSupplies, canonicalRecord: rec('ethereum-sepolia', tokenKey, cell) });
+      const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
+      assert.equal(r.verdict, 'PASS', `[${cell}] failures: ${JSON.stringify(r.failures)} inconclusive: ${JSON.stringify(r.inconclusive)}`);
+      assert.equal(r.stages.supply.verifiedCell, cell);
+      assert.ok(r.stages.supply.cells.every((c) => c.ok));
+    }
   });
 });
 
@@ -145,6 +180,7 @@ describe('finding 5 — a token with no resolvable cell currency can never yield
         { provider: 'clearbank', currency: 'GBP', availableBalance: '500000.00' },
       ],
       ethSupplies: { [GBP_CONTRACT]: 100000000n },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     // Pre-0.5.0: reservesCurrency fell back to '' which DISABLED the currency
@@ -159,6 +195,7 @@ describe('finding 5 — a token with no resolvable cell currency can never yield
     const world = makeWorld({
       sealSpecs: [{ provider: 'clearbank', currency: 'GBP', availableBalance: '1000000.00' }],
       xrplObligations: { TVV: '1000' },
+      canonicalRecord: rec('xrpl-testnet', `gbp.${ISSUER}`, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl });
     assert.equal(r.verdict, 'INCONCLUSIVE');
@@ -170,6 +207,7 @@ describe('finding 5 — a token with no resolvable cell currency can never yield
     const world = makeWorld({
       sealSpecs: [{ provider: 'clearbank', currency: 'GBP', availableBalance: '1000000.00' }],
       ethSupplies: { [GBP_CONTRACT]: 100000000n },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures)} inconclusive: ${JSON.stringify(r.inconclusive)}`);
@@ -185,6 +223,7 @@ describe('finding 3 — several accounts at ONE provider all count (no same-prov
         { provider: 'clearbank', currency: 'GBP', availableBalance: '400000.00', bankAccountId: 'cb-acct-2' },
       ],
       ethSupplies: { [GBP_CONTRACT]: 100000000n },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures)} inconclusive: ${JSON.stringify(r.inconclusive)}`);
@@ -221,7 +260,10 @@ describe('finding 3 — several accounts at ONE provider all count (no same-prov
 describe('finding 4 — absence can never read as PASS', () => {
   test('INCONCLUSIVE: registered tenant with ZERO tokens (reserve check never ran)', async () => {
     setRegistry([]);
-    const world = makeWorld({ sealSpecs: [{ provider: 'clearbank', currency: 'GBP', availableBalance: '0.00' }] });
+    const world = makeWorld({
+      sealSpecs: [{ provider: 'clearbank', currency: 'GBP', availableBalance: '0.00' }],
+      canonicalRecord: rec('combined', 'combined:gbp', 'GBP'),
+    });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl });
     assert.equal(r.verdict, 'INCONCLUSIVE'); // pre-0.5.0: PASS, exit 0
     assert.equal(r.failures.length, 0);
@@ -233,6 +275,7 @@ describe('finding 4 — absence can never read as PASS', () => {
     const world = makeWorld({
       sealSpecs: [{ provider: 'clearbank', currency: 'GBP', availableBalance: '0.00' }],
       ethSupplies: { [GBP_CONTRACT]: 100000000n },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, skipOnChainSupply: true });
     assert.equal(r.verdict, 'INCONCLUSIVE');
@@ -244,6 +287,7 @@ describe('finding 4 — absence can never read as PASS', () => {
     const world = makeWorld({
       sealSpecs: [{ provider: 'clearbank', currency: 'GBP', availableBalance: '1000000.00' }], // GBP evidence only
       ethSupplies: { [EUR_CONTRACT]: 100000000n }, // EUR 1m supply outstanding
+      canonicalRecord: rec('ethereum-sepolia', EUR_CONTRACT, 'EUR'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'FAIL');
@@ -264,6 +308,7 @@ describe('finding 18 — mixed decimals inside a cell no longer throw', () => {
         [GBP_CONTRACT]: 50000000n,                  // £500,000.00 at 2dp
         [GBP18_CONTRACT]: 500000n * (10n ** 18n),  // £500,000 at 18dp
       },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures)} inconclusive: ${JSON.stringify(r.inconclusive)}`);
@@ -285,6 +330,7 @@ describe('finding 19 — tolerance never crosses a cell boundary', () => {
         { provider: 'clearbank', currency: 'GBP', availableBalance: '500000.00' },
       ],
       ethSupplies: { [EUR_CONTRACT]: 10000n, [GBP_CONTRACT]: 100000000n },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'FAIL');
@@ -300,6 +346,7 @@ describe('finding 19 — tolerance never crosses a cell boundary', () => {
     const world = makeWorld({
       sealSpecs: [{ provider: 'clearbank', currency: 'GBP', availableBalance: '999999.00' }], // £1.00 short
       ethSupplies: { [GBP_CONTRACT]: 100000000n },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures)}`); // within the £1.00 tolerance
@@ -316,6 +363,7 @@ describe('protocol v3 — multi-bank witness generation', () => {
         { provider: 'clearbank', currency: 'GBP', availableBalance: '400000.00', bankAccountId: 'cb-acct-2' },
       ],
       ethSupplies: { [GBP_CONTRACT]: 100000000n },
+      canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'),
     });
     const r = await verify({ txHash: TXHASH, tenantId: TENANT, fetchImpl: world.fetchImpl, ethRpcUrl: ETH_RPC });
     assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures)} inconclusive: ${JSON.stringify(r.inconclusive)}`);

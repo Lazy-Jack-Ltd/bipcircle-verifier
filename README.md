@@ -4,6 +4,8 @@ Open-source verifier for the **BIPCircle public-reserve-verifier protocol**. Any
 
 Verification is **per currency cell** (v0.5.0): the issuer is a protected cell company, each cell holds one fiat currency and is legally segregated, so every cell's on-chain supply is compared against ONLY that currency's bank reserves. A surplus in one currency can never cover a shortfall in another. The verdict is three-state — `PASS`, `FAIL`, or `INCONCLUSIVE` (a required check could not be performed; never treat it as PASS).
 
+The verdict is **bound to the cell the transaction attests** (v0.6.0): every attestation transaction carries a canonical record (Memo 1, `treasury-attestation-v1`) naming the cell, the token, and the verdict the issuer published. The verifier reads it, scopes the reserve check to that cell, surfaces a published verdict other than `balanced` (drift → `FAIL`, incomplete coverage → `INCONCLUSIVE`), and labels a `combined` cross-chain row instead of treating it as a per-token attestation. The record's claimed figures are shown but **never used in the reserve comparison** — the reserve still comes only from the signed bank seals and the supply only from the chain.
+
 The verifier reads primary sources (the XRPL ledger, the bank-service's published JWKS, the witness file in GCS, and the on-chain token contract) and re-derives the same checks BIPCircle's anchor side runs internally. The trust roots are **pinned in the verifier source**, not user input, so a wrong URL or social-engineered tx hash can't produce a false PASS.
 
 ## Verify in your browser (no install)
@@ -50,12 +52,14 @@ The first command should print `VERDICT: PASS` along with the witness, signature
 
 ## Pinned tenants in this build
 
-Run `bipcircle-verify --help` to see the live list. As of this README:
+Run `bipcircle-verify --help` to see the live list. As of this README (matching `src/tenants.json`, schema v3, 2026-07-29):
 
-- **`tvvin`** — testnet Sepolia ERC-3643 stablecoin issuer
-  - XRPL issuer (testnet): `rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4`
-  - Ethereum (Sepolia) token contract: `0xDc48900756dB73D795cd5C9Fcb6CAABe33De27c4`
+- **`tvvin`** — testnet Sepolia ERC-3643 stablecoin issuer, one pinned GBP cell
+  - XRPL attestation/issuer account (testnet): `rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34`
+  - Ethereum (Sepolia) token contract: `0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE`
   - Bank-service URL: `https://bank-service-tvvin-yrikeqyelq-nw.a.run.app`
+
+> **Note:** the quick-start transaction above (`7753CF92…`) was anchored by the tenant's PREVIOUS attestation wallet (`rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4`) and will FAIL the account-binding check against the current pinned registry — that is the F2 protection working as designed, not a bug. Replace it with a transaction published by the current pinned account.
 
 ## Use — pinned-tenant mode (preferred)
 
@@ -146,11 +150,12 @@ Exit codes: `0` PASS, `1` FAIL, `2` invocation error, `3` INCONCLUSIVE (no check
 1. **Registry resolution** — looks up the pinned trust roots for `--tenant` OR validates `--unsafe-*` overrides.
 2. **XRPL transaction** — fetches the tx by hash via public JSON-RPC. **Validates `tx.Account === pinned issuer`** (closes Pro F2 cross-account spoofing). Parses Memo 5 (`reserve-verifier-v1`).
 3. **Memo kid binding** — verifies the `bankServicePublicKeyId` in Memo 5 matches the tenant's pinned `kidPattern` (closes Pro F1 attacker-controlled URL).
+3b. **Canonical record (Memo 1)** — parses the eleven-field `treasury-attestation-v1` record in the same tx (`version|asOfDate|chain|tokenKey|currency|verdict|onChain|ledger|bank|delta|reportId`) and binds this transaction to the currency cell it names, cross-checked against the pinned registry (a disagreement is a loud `CELL_BINDING_MISMATCH` FAIL). A published verdict of `out_of_tolerance`/`partial_drift` FAILs (the issuer's own record declares drift); `partial_balanced`/`provider_unavailable`/unknown verdicts are `INCONCLUSIVE`. `chain === 'combined'` marks a per-currency cross-chain row — it is verified as the whole cell and labelled. Historic `v1` records (anchored 2026-05-23..2026-07-29) carry the literal `null` for the bank and delta positions — "never committed", which is a different claim from `0`; they verify normally and the nulls are surfaced as "not committed", never coerced to zero. A missing/unusable record means the verdict cannot be bound to a cell: every registry cell is checked instead and the verdict is at best `INCONCLUSIVE`. `SUPPORTED_CANONICAL_RECORD_VERSIONS` (v1, v2) is the record's fail-closed evolution lever, exactly like Memo 5's `SUPPORTED_PROTOCOL_VERSIONS`.
 4. **Witness file** — HTTPS GET. Validates SHA-256 of the bytes against `witnessSha256` in Memo 5. Schema check.
 5. **Bank-service JWKS** — fetches `/.well-known/bank-service-keys` from the **pinned** bankServiceUrl. Validates every advertised `kid` matches the tenant's `kidPattern`. Rejects duplicate kids; pins `alg=ES256`.
 6. **Seal signatures** — for every seal in the witness, decodes the canonical input and ECDSA-verifies the signature against the matching public key.
 7. **Merkle root** — re-builds the Merkle root from leaf digests; compares to Memo 5's anchored root.
-8. **On-chain supply, per currency cell** — groups the tenant's tokens by their cell currency (`reserveCurrency`), then for EACH cell fetches the tokens' on-chain supplies and compares their sum to the bank-side balances **in that currency only**. Reports `✓ fully backed` or `RESERVE_SHORTFALL[<currency>]` per cell. Tolerances never cross a cell boundary. Several accounts at one bank each count once (dedup key is currency + provider + account reference). If this stage is skipped (`--skip-onchain`), has no token config, or a token's cell currency cannot be resolved, the verdict is `INCONCLUSIVE` — never `PASS`.
+8. **On-chain supply, scoped to the named currency cell** — groups the tenant's tokens by their cell currency (`reserveCurrency`) and verifies the cell the transaction's record names (all cells when the record is unusable): the cell's tokens' on-chain supplies are summed and compared to the bank-side balances **in that currency only**. Reports `✓ fully backed` or `RESERVE_SHORTFALL[<currency>]`. Tolerances never cross a cell boundary. Several accounts at one bank each count once (dedup key is currency + provider + account reference). If this stage is skipped (`--skip-onchain`), has no token config, names a cell the registry doesn't pin, or a token's cell currency cannot be resolved, the verdict is `INCONCLUSIVE` — never `PASS`.
 
 Every stage produces a structured failure record on FAIL, and every check that could not be performed produces an entry in `result.inconclusive`. `--json` gives the full diff.
 
@@ -279,6 +284,17 @@ MIT — see [LICENSE](./LICENSE).
   - **Witness protocol `v3` accepted** (same RFC-6962 tree as v2; balance seals may carry an account reference). Pre-0.5.0 verifiers refuse v3 loudly rather than mis-summing — `SUPPORTED_PROTOCOL_VERSIONS` is the protocol's fail-closed evolution lever.
   - **Breaking surface**: `result.stages.supply` is now `{ ok, cellCount, tokenCount, cells[] }` (was a flat single-currency comparison); `--skip-onchain` and unsafe-override runs exit 3 instead of 0; verdicts are three-state. Published v1/v2 witnesses for single-cell tenants verify with identical verdicts.
   - 63 tests (up from 47), including end-to-end regression pins for each audit finding.
+
+- **v0.6.0** — **BREAKING**: the verdict is bound to the cell the transaction attests (cell audit 2026-07-29, finding 12 — the consumption side; the producer's Memo 1 already named the cell):
+  - **Memo 1 is consumed.** `src/xrpl.js` always extracted the canonical `treasury-attestation-v1` record; nothing read it. Before 0.6.0 a GBP-cell tx and an EUR-cell tx returned **byte-identical** results, both driven by whichever cell `tenants.json` listed first. The supply stage and the verdict are now scoped to the cell the record names (`result.stages.supply.verifiedCell`, `result.stages.record`), cross-checked against the pinned registry — a disagreement about which cell a token belongs to is a loud `CELL_BINDING_MISMATCH` FAIL, never a silent re-scope.
+  - **A published non-`balanced` verdict can never yield a quiet PASS.** `out_of_tolerance`/`partial_drift` → FAIL (`PUBLISHED_VERDICT_DRIFT` — the issuer's own anchored record declares drift); `partial_balanced`/`provider_unavailable`/unrecognised → `INCONCLUSIVE`. This also closes the hole where per-tuple transactions for a currency verified green while the same day's combined row was withheld as coverage-incomplete: the verdict for that currency's tx now reflects what its own record published.
+  - **`combined` rows are labelled, never mistaken for per-tuple.** `chain === 'combined'` is the reportClass marker; the row is verified as the whole cell (which is exactly what a combined row asserts) and reported as `reportClass: 'combined'`.
+  - **Historic `v1` records still verify.** Every record anchored 2026-05-23..2026-07-29 carries the literal `null` in the bank and delta positions (producer finding 8 — structural, not intermittent). `null` maps to "never committed" — a different claim from `0` — is rendered as "not committed", and is never an error and never a zero-reserve claim.
+  - **The record is a claim, not an input.** The claimed onChain/ledger/bank/delta figures are displayed for transparency but are NEVER used in the reserve comparison — the reserve comes only from the signed seals, the supply only from the chain. A v2 record claiming full backing cannot rescue a real seal-level shortfall (pinned by test).
+  - **`SUPPORTED_CANONICAL_RECORD_VERSIONS`** (`src/attestationRecord.js`, v1+v2) is the record's fail-closed evolution lever, the analogue of the witness's `SUPPORTED_PROTOCOL_VERSIONS`: an unknown version token is `INCONCLUSIVE` ("upgrade the verifier"), never a partial read — and never FAIL, since a newer producer format indicts the verifier's age, not the attestation.
+  - **Consistency checks**: the record and the witness in one tx must agree on `asOfDate` (`RECORD_WITNESS_DATE_MISMATCH` → FAIL). A tx with no Memo 1 (not producible by any real producer version) cannot PASS: every registry cell is checked and the verdict is at best `INCONCLUSIVE`.
+  - **Breaking surface**: verdicts for per-tuple txs are now per-cell answers (a healthy EUR cell's tx PASSes even while the GBP cell's own tx FAILs — each speaks for the cell it attests); `result.stages.record` and `result.stages.supply.verifiedCell`/`reportClass` are new; a Memo-5-only tx now yields `INCONCLUSIVE` instead of PASS.
+  - 85 tests (up from 63), including a byte-for-byte parse pin of the real anchored v1 record in tx `7753CF92…`.
 
 Reproducible builds (bit-identical output) remain a later target.
 

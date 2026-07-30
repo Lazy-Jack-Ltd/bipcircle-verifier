@@ -36,10 +36,20 @@ const BANK_URL = 'https://bank-service-tvvin.example';
 const WITNESS_URL = `https://storage.googleapis.com/witnesses/${TENANT}/${DATE}.json`;
 const ISSUER = 'rExampleIssuerAddress0000000000000000000';
 
+// Default Memo 1: a REAL-shaped v1 canonical record (same 11 positional
+// fields as v2, bank + delta = the literal 'null' — the finding-8 producer
+// defect meant EVERY record anchored 2026-05-23..2026-07-29 looks exactly
+// like this). The happy path below therefore doubles as the pin that a
+// historic v1 record still verifies: 'null' = never committed, not zero,
+// and never an error. tokenKey follows tupleTokenKey's XRPL shape,
+// `${lowercased fiat}.${issuer}`.
+const V1_RECORD = `v1|${DATE}|xrpl-testnet|gbp.${ISSUER}|GBP|balanced|1000.00|1000.00|null|null|${DATE}_${TENANT}_xrpl-testnet_gbp.${ISSUER}`;
+
 function makeFixtureWorld({
   jwksKeys = null,           // override JWKS shape
   txAccount = ISSUER,        // override XRPL tx Account
   signWith = null,           // sign with a different keypair (forge test)
+  canonicalRecord = V1_RECORD, // Memo 1 payload; null omits the memo
 } = {}) {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const signKey = signWith || privateKey;
@@ -102,6 +112,7 @@ function makeFixtureWorld({
       Account: txAccount,
       ledger_index: 12345,
       Memos: [
+        ...(canonicalRecord ? [{ Memo: { MemoType: hex('treasury-attestation-v1'), MemoData: hex(canonicalRecord) } }] : []),
         { Memo: { MemoType: hex('reserve-verifier-v1'), MemoData: hex(JSON.stringify(memo5)) } },
       ],
     },
@@ -161,6 +172,14 @@ describe('verify — pinned-tenant happy path', () => {
     assert.equal(r.stages.supply.cells.length, 1);
     assert.equal(r.stages.supply.cells[0].currency, 'GBP');
     assert.equal(r.inconclusive.length, 0);
+    // v0.6.0 — the fixture tx carries a HISTORIC v1 record (bank/delta =
+    // literal 'null'), so this PASS also pins: a v1 record verifies, is
+    // bound to its cell, and 'null' stays "never committed" — never zero,
+    // never an error.
+    assert.equal(r.stages.record.version, 'v1');
+    assert.equal(r.stages.record.claimed.bank, null);
+    assert.equal(r.stages.record.committed.bank, false);
+    assert.equal(r.stages.supply.verifiedCell, 'GBP');
   });
 });
 

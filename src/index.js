@@ -19,6 +19,13 @@
  *
  *   1. fetchAttestationTx(txHash) — pull XRPL tx + decode Memo 5.
  *      Validate tx.Account === xrplIssuerAddress. (F2 fix.)
+ *   1b. parseCanonicalRecord (v0.6.0) — consume Memo 1, the canonical
+ *      attestation record in the same tx. It names the CELL this tx
+ *      attests and the verdict the producer published; the supply stage
+ *      and the verdict are scoped to that cell, a published non-'balanced'
+ *      verdict is surfaced, and a `combined` row is labelled and verified
+ *      as the whole cell. The record's claimed figures are NEVER inputs
+ *      to the PASS/FAIL comparison — re-derivation stays independent.
  *   2. fetchAndValidateWitness — pull witness JSON, validate SHA-256
  *      + claimed Merkle root + schema.
  *   3. fetchJwks(bankServiceUrl) — pull bank-service JWKS. Validate
@@ -47,39 +54,19 @@ import { verifySealSignatures } from './sigverify.js';
 import { computeMerkleRootForVersion } from './merkle.js';
 import { lookupTenant } from './tenantRegistry.js';
 import {
+  parseCanonicalRecord,
+  bindRecordToCell,
+  resolveCellCurrency,
+  PUBLISHED_VERDICT_BALANCED,
+  PUBLISHED_DRIFT_VERDICTS,
+} from './attestationRecord.js';
+import {
   getEthereumErc20TotalSupply,
   getXrplIssuedSupply,
   sumBankReservesDetailed,
   compareReservesVsSupply,
   decimalStringToMinorUnits,
 } from './onchain.js';
-
-/**
- * Resolve the fiat currency of the CELL a token belongs to.
- *
- * The issuer is a protected cell company: each cell holds exactly one fiat
- * currency and is legally segregated, so the cell currency is the boundary
- * every reserve comparison must respect.
- *
- *   - `reserveCurrency` (explicit, preferred — registry schema v3)
- *   - legacy fallback: for ethereum tokens, `currency` has always been the
- *     fiat denomination (e.g. 'GBP'), so it is a safe cell key
- *   - XRPL tokens' `currency` is the ON-LEDGER TICKER (e.g. 'TVV'), never a
- *     fiat currency — no fallback. Missing reserveCurrency on an XRPL token
- *     resolves to null and the verdict becomes INCONCLUSIVE (fail-closed):
- *     an unassignable token must never silently vanish from the liability.
- *
- * @returns {string|null}
- */
-function resolveCellCurrency(tok) {
-  if (typeof tok.reserveCurrency === 'string' && tok.reserveCurrency.trim().length > 0) {
-    return tok.reserveCurrency.trim();
-  }
-  if (tok.chain === 'ethereum' && typeof tok.currency === 'string' && tok.currency.trim().length > 0) {
-    return tok.currency.trim();
-  }
-  return null;
-}
 
 export async function verify({
   txHash,
@@ -184,6 +171,75 @@ export async function verify({
     return result;
   }
 
+  // Stage 1b (v0.6.0 — 2026-07-29 cell audit, finding 12): consume Memo 1,
+  // the canonical attestation record in the SAME transaction. It names the
+  // cell this transaction attests (currency + chain + tokenKey) and the
+  // verdict the producer published. xrpl.js has always extracted it; before
+  // 0.6.0 nothing read it, so a GBP-cell tx and an EUR-cell tx returned
+  // byte-identical results and a published non-'balanced' verdict was
+  // silently ignored.
+  //
+  // TRUST BOUNDARY: the record is producer-authored. It is used ONLY to
+  //   (a) scope the supply stage + verdict to the cell it names, and
+  //   (b) surface the published verdict / claimed figures.
+  // The reserve figure still comes ONLY from the signed seals and the
+  // supply ONLY from the chain — the record's claimed onChain/ledger/bank/
+  // delta values are never inputs to the PASS/FAIL comparison. In v1
+  // records (every tx anchored 2026-05-23..2026-07-29) bank and delta are
+  // the literal 'null' — "never committed", which is a different claim from
+  // 0 and is preserved as null, never coerced.
+  let record = null;
+  if (txResult.canonicalRecord == null) {
+    // Every producer version since 2026-05-23 emits Memo 1 in the same tx as
+    // Memo 5, so absence is an anomaly: the verdict cannot be bound to a
+    // cell. Fail-closed to INCONCLUSIVE, but still verify every registry
+    // cell below so a genuine shortfall anywhere still surfaces as FAIL.
+    result.stages.record = { ok: null, present: false };
+    result.inconclusive.push({
+      stage: 'record',
+      reason: 'CANONICAL_RECORD_MISSING: the transaction carries no treasury-attestation-v1 memo, so the verdict cannot be bound to the cell it attests. Every registry cell was checked instead; the verdict cannot be PASS.',
+    });
+  } else {
+    try {
+      record = parseCanonicalRecord(txResult.canonicalRecord);
+      result.stages.record = {
+        ok: true,
+        present: true,
+        version: record.version,
+        asOfDate: record.asOfDate,
+        chain: record.chain,
+        tokenKey: record.tokenKey,
+        currency: record.currency,
+        verdict: record.verdict,
+        reportClass: record.reportClass,
+        reportId: record.reportId,
+        claimed: record.claimed,
+        committed: { bank: record.claimed.bank !== null, delta: record.claimed.delta !== null },
+      };
+      // Surface the PUBLISHED verdict — a non-'balanced' record must never
+      // yield a quiet PASS (finding 12, item 2).
+      if (record.verdict !== PUBLISHED_VERDICT_BALANCED) {
+        if (PUBLISHED_DRIFT_VERDICTS.has(record.verdict)) {
+          result.failures.push({
+            stage: 'record',
+            reason: `PUBLISHED_VERDICT_DRIFT: the anchored record itself declares verdict '${record.verdict}' for the ${record.currency} cell — the issuer's own attestation records a detected discrepancy on ${record.asOfDate}. This transaction is evidence of drift, not of backing.`,
+          });
+        } else {
+          result.inconclusive.push({
+            stage: 'record',
+            reason: `PUBLISHED_VERDICT_NOT_BALANCED: the anchored record declares verdict '${record.verdict}' for the ${record.currency} cell — the issuer's own attestation does not claim the cell was fully verified on ${record.asOfDate} (coverage/view incomplete${record.verdict === 'partial_balanced' || record.verdict === 'provider_unavailable' ? '' : ', or an unrecognised verdict token'}). The verdict cannot be PASS.`,
+          });
+        }
+      }
+    } catch (err) {
+      result.stages.record = { ok: null, present: true, error: err.code || 'RECORD_MALFORMED' };
+      result.inconclusive.push({
+        stage: 'record',
+        reason: `${err.code || 'RECORD_MALFORMED'}: ${err.message} — the verdict cannot be bound to the cell this transaction attests. Every registry cell was checked instead; the verdict cannot be PASS.`,
+      });
+    }
+  }
+
   // Stage 2: witness
   let witness;
   try {
@@ -203,6 +259,17 @@ export async function verify({
     result.failures.push({ stage: 'witness', reason: err.message });
     result.verdict = 'FAIL';
     return result;
+  }
+
+  // Memo 1 and Memo 5 live in ONE transaction and are authored by one
+  // producer run — their business dates must agree. A mismatch means the
+  // evidence set is internally inconsistent (or stitched together), and no
+  // verdict derived from it can be trusted.
+  if (record && witness.asOfDate !== record.asOfDate) {
+    result.failures.push({
+      stage: 'record',
+      reason: `RECORD_WITNESS_DATE_MISMATCH: the anchored record covers ${record.asOfDate} but the witness in the same transaction covers ${witness.asOfDate} — inconsistent evidence set.`,
+    });
   }
 
   // Stage 3: JWKS + kid pattern binding
@@ -263,23 +330,33 @@ export async function verify({
     });
   }
 
-  // Stage 6: on-chain supply comparison — PER CURRENCY CELL (v0.5.0).
+  // Stage 6: on-chain supply comparison — PER CURRENCY CELL (v0.5.0),
+  // SCOPED to the cell the transaction's own record names (v0.6.0).
   //
   // The issuer is a protected cell company. Each cell holds ONE fiat currency
   // and is legally segregated: cell A's surplus can never cover cell B's
   // shortfall — that segregation is the point of the structure, and checking
   // it is why this tool exists. Tokens are therefore grouped by their cell
-  // currency (resolveCellCurrency) and EVERY cell is verified against ONLY
+  // currency (resolveCellCurrency) and a cell is verified against ONLY
   // its own currency's bank reserves. Pre-0.5.0 releases summed all tokens'
   // supplies into one pot and compared it against one currency's reserves —
   // a EUR surplus could silently pay for a GBP shortfall.
+  //
+  // v0.6.0 scoping: when Memo 1 binds this transaction to a cell, ONLY that
+  // cell is verified and the verdict speaks for that cell alone — a GBP-cell
+  // tx and an EUR-cell tx now answer their own questions instead of both
+  // being driven by whichever cell the registry lists first. When the record
+  // is missing/unusable, every registry cell is verified (more checks, but
+  // an unbound verdict — INCONCLUSIVE at best, and a shortfall anywhere
+  // still FAILs).
   //
   // The verdict can never become PASS through absence:
   //   - --skip-onchain            → INCONCLUSIVE, never PASS
   //   - zero tokens configured    → INCONCLUSIVE (registry gap ≠ verified)
   //   - unsafe-override mode      → INCONCLUSIVE (no pinned token config)
   //   - unresolvable cell currency→ INCONCLUSIVE (token can't vanish silently)
-  // A genuine reserve shortfall in ANY cell → FAIL.
+  //   - named cell not in registry→ INCONCLUSIVE (can't verify the named claim)
+  // A genuine reserve shortfall in a VERIFIED cell → FAIL.
   if (skipOnChainSupply) {
     result.stages.supply = { ok: null, skipped: true, reason: 'skipped by flag (--skip-onchain)' };
     result.inconclusive.push({
@@ -316,8 +393,45 @@ export async function verify({
       cellsByCurrency.get(cellCurrency).push(tok);
     }
 
+    // v0.6.0 — bind the record to the cell it names and scope the check.
+    // NOTE: tokens with an unresolvable cell currency were flagged
+    // INCONCLUSIVE above and stay flagged even when the run is scoped — an
+    // unassignable token cannot be proven to be OUTSIDE the named cell, so
+    // its absence from the check must keep the verdict from reaching PASS.
+    let scopedCell = null;
+    if (record) {
+      const bind = bindRecordToCell(record, trustRoots.tokens);
+      if (bind.ok) {
+        const cellKey = [...cellsByCurrency.keys()]
+          .find((k) => k.toUpperCase() === bind.cellCurrency.toUpperCase());
+        if (cellKey === undefined) {
+          result.inconclusive.push({
+            stage: 'supply',
+            reason: `NAMED_CELL_NOT_IN_REGISTRY: the transaction attests the ${bind.cellCurrency} cell, but this verifier's pinned registry holds no tokens for that cell — the named claim cannot be verified. Upgrade @lazyjackorg/bipcircle-verifier. Every registry cell was checked instead; the verdict cannot be PASS.`,
+          });
+        } else {
+          scopedCell = cellKey;
+        }
+      } else if (bind.code === 'CELL_BINDING_MISMATCH') {
+        // Producer record and pinned registry disagree about a legally
+        // segregated boundary — loud FAIL, never a silent re-scope. All
+        // cells are still verified for information.
+        result.failures.push({ stage: 'supply', reason: `CELL_BINDING_MISMATCH: ${bind.reason}` });
+      } else if (bind.code !== 'CELL_CURRENCY_UNRESOLVED') {
+        // CELL_CURRENCY_UNRESOLVED is already flagged per-token above;
+        // re-pushing it here would duplicate the same inconclusive entry.
+        result.inconclusive.push({
+          stage: 'supply',
+          reason: `${bind.code}: ${bind.reason} — every registry cell was checked instead; the verdict cannot be PASS.`,
+        });
+      }
+    }
+    const cellEntries = scopedCell !== null
+      ? [[scopedCell, cellsByCurrency.get(scopedCell)]]
+      : [...cellsByCurrency];
+
     const cells = [];
-    for (const [cellCurrency, cellTokens] of cellsByCurrency) {
+    for (const [cellCurrency, cellTokens] of cellEntries) {
       try {
         const badDecimals = cellTokens.find(
           (t) => !Number.isInteger(t.decimals) || t.decimals < 0 || t.decimals > 18,
@@ -437,6 +551,11 @@ export async function verify({
       ok: anyCellFailed ? false : (anyCellInconclusive ? null : true),
       cellCount: cells.length,
       tokenCount: trustRoots.tokens.length,
+      // v0.6.0 — non-null when the check was scoped to the cell the
+      // transaction's record names; the verdict then speaks for that cell
+      // alone. null = unscoped run over every registry cell.
+      verifiedCell: scopedCell,
+      reportClass: record ? record.reportClass : null,
       cells,
     };
   }

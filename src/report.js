@@ -8,6 +8,13 @@
  * reviewer can click straight through to the issuer account whose on-ledger
  * obligations ARE the issued balance. Previously the CLI emitted only a link
  * to the attestation tx and the reserve/supply figures in raw minor units.
+ *
+ * v0.6.0 — surfaces the ATTESTATION RECORD (Memo 1): which cell the tx
+ * attests, the verdict the issuer published, and the issuer's claimed
+ * figures — clearly labelled as claims, because the reserve comparison uses
+ * ONLY the independently re-derived figures. A 'null' claim renders as "not
+ * committed" (v1 records never anchored the reserve or the drift; null is a
+ * different claim from zero). The VERDICT line names the verified cell.
  */
 
 // Hosted browser verifier (GitHub Pages) — reads the live on-chain treasury balance + links to the
@@ -61,7 +68,33 @@ export function formatMinor(minorStr, decimals = 0, currency = '') {
 /** Render a verify() result as the CLI's human-readable report. */
 export function renderHuman(result, { network = 'mainnet', txHash } = {}) {
   const L = [''];
-  L.push(`VERDICT: ${result.verdict}`);
+  // v0.6.0 — when the check was scoped to the cell the transaction's own
+  // record names, the verdict speaks for THAT cell alone and says so.
+  const verifiedCell = result.stages?.supply?.verifiedCell;
+  L.push(`VERDICT: ${result.verdict}${verifiedCell ? ` — ${verifiedCell} cell (scoped to the cell this transaction attests)` : ''}`);
+
+  // v0.6.0 — the published attestation record (Memo 1). These are the
+  // ISSUER'S CLAIMS, shown for transparency; the TREASURY block below is
+  // independently re-derived from the signed seals + the chain and is the
+  // only thing the verdict's reserve comparison uses.
+  const rec = result.stages?.record;
+  if (rec && rec.present && rec.ok) {
+    L.push('');
+    L.push(`  ATTESTATION RECORD (Memo 1, ${rec.version}${rec.reportClass === 'combined' ? ', combined cross-chain row — verified as the whole cell' : ''}):`);
+    L.push(`    cell / currency:    ${rec.currency}   asOfDate: ${rec.asOfDate}`);
+    L.push(`    published verdict:  ${rec.verdict}`);
+    const claim = (v) => (v === null
+      ? `not committed${rec.version === 'v1' ? ' (v1 record — never anchored; null is NOT zero)' : ''}`
+      : `${v} ${rec.currency} (issuer's claim, as of ${rec.asOfDate} — not used in the reserve comparison)`);
+    L.push(`    claimed on-chain:   ${claim(rec.claimed.onChain)}`);
+    L.push(`    claimed ledger:     ${claim(rec.claimed.ledger)}`);
+    L.push(`    claimed bank:       ${claim(rec.claimed.bank)}`);
+    L.push(`    claimed delta:      ${rec.claimed.delta === null ? 'not committed' : rec.claimed.delta}`);
+  } else if (rec && rec.present && !rec.ok) {
+    L.push(`  attestation record (Memo 1): NOT USABLE (${rec.error}) — see NOT VERIFIED below`);
+  } else if (rec && !rec.present) {
+    L.push('  attestation record (Memo 1): MISSING — verdict cannot be bound to a cell');
+  }
 
   const w = result.stages?.witness;
   if (w) {

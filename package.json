@@ -1,7 +1,7 @@
 {
   "name": "@lazyjackorg/bipcircle-verifier",
-  "version": "0.5.0",
-  "description": "Open-source verifier for BIPCircle stablecoin reserve attestations. Re-derives PASS/FAIL/INCONCLUSIVE from primary sources (XRPL, bank-service JWKS, on-chain token supply) without trusting BIPCircle or Lazy-Jack infrastructure. Verifies each currency cell against its own reserves — legally segregated cells never net.",
+  "version": "0.6.0",
+  "description": "Open-source verifier for BIPCircle stablecoin reserve attestations. Re-derives PASS/FAIL/INCONCLUSIVE from primary sources (XRPL, bank-service JWKS, on-chain token supply) without trusting BIPCircle or Lazy-Jack infrastructure. Verifies each currency cell against its own reserves — legally segregated cells never net — and binds every verdict to the cell the transaction's own anchored record names.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -14,7 +14,8 @@
   "exports": {
     ".": "./src/index.js",
     "./canonical": "./src/canonical.js",
-    "./merkle": "./src/merkle.js"
+    "./merkle": "./src/merkle.js",
+    "./attestationRecord": "./src/attestationRecord.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js",

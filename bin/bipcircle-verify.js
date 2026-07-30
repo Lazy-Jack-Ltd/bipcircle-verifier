@@ -79,7 +79,7 @@ function parseArgs(argv) {
 function printHelp() {
   let registeredIds = [];
   try { registeredIds = listTenantIds(); } catch (e) { /* registry missing — handled in verify */ }
-  process.stdout.write(`bipcircle-verify — public-reserve-verifier (witness protocols v1-v3, per-currency-cell)
+  process.stdout.write(`bipcircle-verify — public-reserve-verifier (witness protocols v1-v3, canonical records v1-v2, per-currency-cell, verdict bound to the cell the tx attests)
 
 USAGE (pinned tenant, preferred):
   bipcircle-verify --xrpl-tx <hash> --tenant <tenantId>
@@ -105,13 +105,20 @@ OPTIONS:
   -h, --help                 Show this help
 
 EXIT CODES:
-  0   VERDICT: PASS          every check ran and held, per currency cell
-  1   VERDICT: FAIL          at least one check failed
+  0   VERDICT: PASS          every check ran and held for the currency cell
+                             this transaction attests (Memo 1)
+  1   VERDICT: FAIL          at least one check failed — including a reserve
+                             shortfall in the named cell, a published
+                             drift verdict in the tx's own record, or a
+                             record/registry cell disagreement
   2   invocation error
   3   VERDICT: INCONCLUSIVE  no check failed, but at least one required
                              check could not be performed (skipped stage,
                              missing token config, unresolvable cell
-                             currency). Never treat as PASS.
+                             currency, missing/unsupported Memo 1 record,
+                             cell not in this registry, or the issuer's own
+                             record disclaims full coverage). Never treat
+                             as PASS.
 
 PROTOCOL:
   https://github.com/Lazy-Jack-Ltd/bipcircle/blob/main/Documentation/architecture/public-reserve-verifier-protocol.md
