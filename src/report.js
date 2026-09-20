@@ -73,6 +73,19 @@ export function renderHuman(result, { network = 'mainnet', txHash } = {}) {
   const verifiedCell = result.stages?.supply?.verifiedCell;
   L.push(`VERDICT: ${result.verdict}${verifiedCell ? ` — ${verifiedCell} cell (scoped to the cell this transaction attests)` : ''}`);
 
+  // v0.7.0 — when the issuer's OWN anchored record declares a drift verdict,
+  // say so on the headline. This is the loudest thing a reserve attestation
+  // can carry: the producer detected a discrepancy and published it. A reader
+  // skimming for "FAIL" must not have to infer whether the tool broke or the
+  // reserve did, so the cause is named next to the verdict rather than only
+  // in the FAILURES list further down.
+  const drift = (result.failures || []).find((f) => /^PUBLISHED_VERDICT_DRIFT/.test(f.reason || ''));
+  if (drift) {
+    const pv = result.stages?.record?.verdict;
+    L.push(`  ↳ the issuer's own anchored record declares '${pv}' — this transaction is evidence of a DETECTED RESERVE DISCREPANCY, not of backing.`);
+    L.push('    (that is a published attestation of drift, not a verifier malfunction)');
+  }
+
   // v0.6.0 — the published attestation record (Memo 1). These are the
   // ISSUER'S CLAIMS, shown for transparency; the TREASURY block below is
   // independently re-derived from the signed seals + the chain and is the

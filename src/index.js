@@ -68,6 +68,21 @@ import {
   decimalStringToMinorUnits,
 } from './onchain.js';
 
+/**
+ * A check that could not be PERFORMED because of how this verifier was
+ * configured or invoked — a missing --eth-rpc-url, a registry precision that
+ * cannot represent the ledger's value. Distinct from a check that RAN and
+ * failed. The former is INCONCLUSIVE, the latter FAIL; conflating them is how
+ * "the reserve is short" and "the tool is misconfigured" become the same
+ * output, and the whole point of this tool is that those are different claims.
+ */
+class CellConfigError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'CellConfigError';
+  }
+}
+
 export async function verify({
   txHash,
   tenantId,
@@ -105,15 +120,40 @@ export async function verify({
     }
     trustRoots = {
       bankServiceUrl: t.bankServiceUrl,
-      xrplIssuerAddress: t.xrplIssuerAddress,
+      // v0.7.0 — the account the attestation tx must be SIGNED BY. Formerly
+      // (mis)named xrplIssuerAddress; the registry loader resolves the alias.
+      // This is NOT the token issuer — that lives on tokens[].issuer and is
+      // read by a different stage for a different purpose.
+      xrplPublishingAccount: t.xrplPublishingAccount,
+      // v0.7.0 — the BIPCircle platform tenant id the witness must name.
+      bipcircleTenantId: t.bipcircleTenantId,
       kidRegex: t._kidRegex,
       // v2 registry shape: tokens[] (multi-chain). tenantRegistry.js
       // back-compat-maps the old single `token` to a 1-element array
       // so reads here always see an array.
       tokens: Array.isArray(t.tokens) ? t.tokens : [],
     };
+    // A pinned entry with no publishing account has no F2 trust root at all.
+    // Fail loudly on the registry defect rather than letting the comparison
+    // below silently reject every account against `null`, which would read as
+    // "this tx came from the wrong account" — blaming the transaction for a
+    // hole in this file.
+    if (!trustRoots.xrplPublishingAccount) {
+      result.failures.push({
+        stage: 'registry',
+        reason: `REGISTRY_ENTRY_INCOMPLETE: pinned tenant '${tenantId}' has no xrplPublishingAccount (nor the deprecated xrplIssuerAddress alias), so there is no trust root for the attestation transaction's signing account. This is a defect in the verifier's own registry, NOT evidence about the transaction — no verdict can be derived. Fix src/tenants.json and cut a release.`,
+      });
+      result.verdict = 'FAIL';
+      return result;
+    }
     result.mode = 'registered-tenant';
-    result.stages.registry = { ok: true, tenantId, source: 'pinned', tokenCount: trustRoots.tokens.length };
+    result.stages.registry = {
+      ok: true,
+      tenantId,
+      bipcircleTenantId: trustRoots.bipcircleTenantId,
+      source: 'pinned',
+      tokenCount: trustRoots.tokens.length,
+    };
   } else {
     if (!unsafeBankServiceUrl || !unsafeIssuer) {
       result.failures.push({
@@ -125,7 +165,12 @@ export async function verify({
     }
     trustRoots = {
       bankServiceUrl: unsafeBankServiceUrl,
-      xrplIssuerAddress: unsafeIssuer,
+      xrplPublishingAccount: unsafeIssuer,
+      // No pinned platform tenant id in override mode, so the witness-tenant
+      // binding below cannot run. tokens[] is empty by construction, so the
+      // supply stage never runs either and the verdict is capped at
+      // INCONCLUSIVE — an override can never reach PASS.
+      bipcircleTenantId: null,
       kidRegex: null,
       tokens: [],
     };
@@ -137,10 +182,12 @@ export async function verify({
   let txResult;
   try {
     txResult = await fetchAttestationTx({ txHash, network, rpcUrl, fetchImpl });
-    if (txResult.account !== trustRoots.xrplIssuerAddress) {
+    if (txResult.account !== trustRoots.xrplPublishingAccount) {
       throw new Error(
-        `XRPL_ACCOUNT_MISMATCH: tx ${txHash} was published by '${txResult.account}' but the trust root expects '${trustRoots.xrplIssuerAddress}'. ` +
-        `This tx is not a legitimate ${tenantId || 'unsafe-override'} attestation.`,
+        `XRPL_ACCOUNT_MISMATCH: tx ${txHash} was signed by account '${txResult.account}' but the pinned publishing account for `
+        + `'${tenantId || 'unsafe-override'}' is '${trustRoots.xrplPublishingAccount}'. This tx is not a legitimate `
+        + `${tenantId || 'unsafe-override'} attestation. Note this is the account that SIGNS the attestation, not a token `
+        + `issuer — a tx signed by a token issuer address is still not an attestation.`,
       );
     }
     result.stages.xrpl = {
@@ -259,6 +306,27 @@ export async function verify({
     result.failures.push({ stage: 'witness', reason: err.message });
     result.verdict = 'FAIL';
     return result;
+  }
+
+  // v0.7.0 — bind the witness to the PLATFORM TENANT this pin names.
+  //
+  // Memo 5 carries no tenant identifier, so the witness's own `tenantId` is
+  // the only place the evidence names the deployment it came from. Until now
+  // nothing checked it: the verifier read it and printed it. That was
+  // survivable while one pin existed, but pins share a bank-service URL and a
+  // signing key (there is exactly one of each today), so without this check
+  // the kid pattern and JWKS would happily accept a DIFFERENT deployment's
+  // witness and the only thing separating two tenants would be the publishing
+  // account. Anchoring another tenant's witness is then a producer misconfig
+  // away from a verdict about the wrong reserve.
+  //
+  // Skipped in unsafe-override mode, which pins no platform tenant id — that
+  // mode is already capped at INCONCLUSIVE by the absent token config.
+  if (trustRoots.bipcircleTenantId && witness.tenantId !== trustRoots.bipcircleTenantId) {
+    result.failures.push({
+      stage: 'witness',
+      reason: `WITNESS_TENANT_MISMATCH: the witness anchored by this transaction declares tenantId='${witness.tenantId}' but the pinned tenant '${tenantId}' expects the BIPCircle tenant '${trustRoots.bipcircleTenantId}'. The reserve evidence belongs to a different deployment, so it cannot back this transaction's supply.`,
+    });
   }
 
   // Memo 1 and Memo 5 live in ONE transaction and are authored by one
@@ -465,7 +533,11 @@ export async function verify({
           let supplyMinor;
           if (tok.chain === 'ethereum') {
             if (!ethRpcUrl) {
-              throw new Error('ethRpcUrl required for ethereum-chain on-chain check (pass --eth-rpc-url)');
+              throw new CellConfigError(
+                `ETH_RPC_URL_NOT_SUPPLIED: token '${tok.label || tok.contract}' is on an EVM chain, so reading its `
+                + `totalSupply() needs an Ethereum JSON-RPC endpoint and none was given. Re-run with `
+                + `--eth-rpc-url <url>. The ${cellCurrency} cell was NOT verified.`,
+              );
             }
             supplyMinor = await getEthereumErc20TotalSupply({
               rpcUrl: ethRpcUrl,
@@ -482,7 +554,23 @@ export async function verify({
               currencyCode: tok.currency,
               fetchImpl,
             });
-            supplyMinor = decimalStringToMinorUnits(supplyStr, tok.decimals);
+            // An XRPL issued currency has no on-ledger decimals field: the
+            // ledger returns a decimal string and the registry pins the
+            // precision. If the ledger carries MORE fractional digits than
+            // the pin allows, the supply cannot be converted exactly — that
+            // is a defect in this verifier's registry, not evidence that the
+            // reserve is short, and must not be reported as a shortfall.
+            try {
+              supplyMinor = decimalStringToMinorUnits(supplyStr, tok.decimals);
+            } catch (convErr) {
+              throw new CellConfigError(
+                `XRPL_SUPPLY_PRECISION_UNPINNED: the ledger reports ${tok.currency} obligations of '${supplyStr}' for `
+                + `issuer ${tok.issuer}, which carries more fractional precision than the registry's pinned `
+                + `decimals=${tok.decimals} for token '${tok.label || tok.currency}'. The supply could not be converted `
+                + `exactly, so the ${cellCurrency} cell was NOT verified. Raise decimals for this token in `
+                + `src/tenants.json and cut a release. (${convErr.message})`,
+              );
+            }
           } else {
             throw new Error(`unknown chain '${tok.chain}' in tenant registry`);
           }
@@ -541,7 +629,18 @@ export async function verify({
           });
         }
       } catch (err) {
-        result.failures.push({ stage: 'supply', reason: `[cell ${cellCurrency}] ${err.message}` });
+        // A CellConfigError means THIS TOOL could not perform the check —
+        // a flag the user did not pass, a precision this registry did not
+        // pin. That is not evidence about the reserve, and reporting it as a
+        // FAIL would put "the reserve is short" and "you forgot an argument"
+        // in the same bucket, which is exactly the confusion a reserve
+        // verifier cannot afford. It is INCONCLUSIVE: still never PASS,
+        // still a non-zero exit, but honestly attributed.
+        if (err instanceof CellConfigError) {
+          result.inconclusive.push({ stage: 'supply', reason: `[cell ${cellCurrency}] ${err.message}` });
+        } else {
+          result.failures.push({ stage: 'supply', reason: `[cell ${cellCurrency}] ${err.message}` });
+        }
       }
     }
 
