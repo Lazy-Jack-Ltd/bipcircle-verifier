@@ -26,40 +26,34 @@ Requires Node.js 20+.
 
 ## Quick start
 
-The only currently pinned tenant is **`tvvin`**, which lives on **XRPL testnet** with a stablecoin contract on **Ethereum Sepolia**. For your first run, copy and paste one of these commands:
-
-**Full verification including on-chain supply check:**
+The only currently pinned tenant is **`tvvin-sandbox`**, which lives on **XRPL testnet** with a stablecoin contract on **Ethereum Sepolia**.
 
 ```bash
 bipcircle-verify \
-  --xrpl-tx 7753CF92C7C017D2C9C721F1A72F3BEA55030DD655D6377E7750C757FB711E57 \
-  --tenant tvvin \
+  --xrpl-tx <hash> \
+  --tenant tvvin-sandbox \
   --network testnet \
   --eth-rpc-url https://ethereum-sepolia-rpc.publicnode.com
 ```
 
-**Or, skip the on-chain stage** so you don't need an Ethereum RPC URL:
+Drop `--eth-rpc-url` and pass `--skip-onchain` to run the integrity stages without an Ethereum endpoint; the verdict is then `INCONCLUSIVE` (exit 3), because a skipped check is never reported as a passed one.
 
-```bash
-bipcircle-verify \
-  --xrpl-tx 7753CF92C7C017D2C9C721F1A72F3BEA55030DD655D6377E7750C757FB711E57 \
-  --tenant tvvin \
-  --network testnet \
-  --skip-onchain
-```
-
-The first command should print `VERDICT: PASS` along with the witness, signature, Merkle, and per-cell reserve results. The second prints `VERDICT: INCONCLUSIVE` (exit 3): the integrity stages ran, but the reserve backing was not verified — a skipped check is never reported as a passed one.
+> **There is no copy-paste transaction hash here on purpose.** The one this README used to ship (`7753CF92…`) was anchored by a different deployment's attestation wallet (`rat8Bjs…`) and **FAILs** the account-binding check against the current registry — correctly, since it is not a `tvvin-sandbox` attestation. Printing a command advertised as `VERDICT: PASS` that cannot pass trains readers to ignore the verdict, which is the one thing this tool must not do. Use a transaction published by the pinned account below.
 
 ## Pinned tenants in this build
 
-Run `bipcircle-verify --help` to see the live list. As of this README (matching `src/tenants.json`, schema v3, 2026-07-29):
+Run `bipcircle-verify --help` to see the live list. As of this README (matching `src/tenants.json`, schema v4, 2026-09-20):
 
-- **`tvvin`** — testnet Sepolia ERC-3643 stablecoin issuer, one pinned GBP cell
-  - XRPL attestation/issuer account (testnet): `rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34`
-  - Ethereum (Sepolia) token contract: `0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE`
+- **`tvvin-sandbox`** — testnet/Sepolia stablecoin issuer, one pinned GBP cell
+  - **XRPL publishing account** (signs the attestation tx, testnet): `rL78qvWguiRiTjkwX4m8WfXaA84Te1ju2u`
+  - **XRPL token issuer** (its obligations are the on-ledger supply): `rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34`
+  - **Ethereum (Sepolia) token contract**: `0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE`
   - Bank-service URL: `https://bank-service-tvvin-yrikeqyelq-nw.a.run.app`
+  - BIPCircle platform tenant (must match the witness): `tvvin-sandbox`
 
-> **Note:** the quick-start transaction above (`7753CF92…`) was anchored by the tenant's PREVIOUS attestation wallet (`rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4`) and will FAIL the account-binding check against the current pinned registry — that is the F2 protection working as designed, not a bug. Replace it with a transaction published by the current pinned account.
+> **Those first three are three different things.** The publishing account signs the attestation and issues nothing. The token issuer issues TVV and signs nothing. The contract is an EVM address and is neither. Through v0.6.0 the registry pinned the *token issuer* as the account attestations must come from, so every genuine attestation failed the account check — see `THREE_SEPARATE_IDENTITIES` in `src/tenants.json` before editing any of them.
+>
+> The `tvvin` pin was **removed** in v0.7.0 rather than repaired: it named a different deployment but carried this one's ETH token, so it verified nothing. Transactions from that deployment (anchor wallet `rat8Bjs…`) FAIL under this registry, which is correct — they are not `tvvin-sandbox` attestations.
 
 ## Use — pinned-tenant mode (preferred)
 
@@ -205,9 +199,10 @@ Tenants are pinned in source: every release embeds the registry available at rel
 
    ```json
    {
-     "tenantId": "your-tenant-id",
+     "tenantId": "your-pin-name",
+     "bipcircleTenantId": "your-platform-tenant-id",
      "bankServiceUrl": "https://bank-service-your-tenant.run.app",
-     "xrplIssuerAddress": "rYourTreasuryWalletAddress...",
+     "xrplPublishingAccount": "rTheAccountThatSIGNSTheAttestationTx...",
      "kidPattern": "^projects/your-gcp-project/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/your-tenant-signer/cryptoKeyVersions/\\d+$",
      "tokens": [
        {
@@ -215,18 +210,24 @@ Tenants are pinned in source: every release embeds the registry available at rel
          "chain": "ethereum",
          "contract": "0xYourErc20Address...",
          "decimals": 18,
-         "currency": "GBP"
+         "currency": "GBP",
+         "reserveCurrency": "GBP"
        },
        {
          "label": "MyStable-XRPL-Testnet",
          "chain": "xrpl",
-         "issuer": "rYourXrplIssuerAddress...",
+         "issuer": "rTheAccountThatISSUESTheToken...",
          "currency": "MST",
-         "decimals": 0
+         "decimals": 6,
+         "reserveCurrency": "GBP"
        }
      ]
    }
    ```
+
+   **`xrplPublishingAccount` and `tokens[].issuer` are different accounts.** The first signs the daily attestation transaction (producer side: `fund_tenants/{id}.xrplAttestationWallet.address`) and issues nothing; the second issues the token and signs nothing. Putting the issuer in both fields is the defect v0.7.0 fixed, and it makes every genuine attestation fail the account check. `tenantId` is the **pin name** users type after `--tenant`; `bipcircleTenantId` is the platform tenant id and is enforced against the witness file's `tenantId`, so two deployments sharing one bank-service cannot verify each other's evidence.
+
+   **Pick `decimals` for an XRPL token as a precision ceiling, not a display preference.** XRPL issued currencies have no on-ledger decimals field — `gateway_balances` returns a decimal string with up to 15 significant digits. If the ledger carries more fractional digits than you pin, the supply cannot be converted exactly and the cell reports `INCONCLUSIVE` (`XRPL_SUPPLY_PRECISION_UNPINNED`), not a shortfall. `0` is almost always wrong.
 
    Every token entry should carry `reserveCurrency` — the fiat currency of the legally segregated cell the token belongs to. The verifier groups tokens by `reserveCurrency` and verifies each cell's summed supply against ONLY that currency's bank reserves; per-token supplies are reported individually so a reviewer can see which chain contributes how much of each cell's liability. `currency` keeps its per-chain meaning: fiat denomination for `ethereum` tokens (used as a legacy `reserveCurrency` fallback), on-ledger ticker for `xrpl` tokens (used for `gateway_balances` — never a cell key, so `reserveCurrency` is REQUIRED there). A token with no resolvable cell currency makes the verdict `INCONCLUSIVE`.
 
