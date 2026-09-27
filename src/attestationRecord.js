@@ -32,6 +32,9 @@
  *   figures are never inputs to the PASS/FAIL comparison. A published
  *   verdict other than 'balanced' is surfaced (drift → FAIL, coverage →
  *   INCONCLUSIVE) because the issuer's own record disclaims full backing.
+ *   'over_reserved' is the one exception: it claims MORE than full backing,
+ *   so it is neither, and it is tested against the verifier's own reserve
+ *   comparison instead (reserves >= supply, or FAIL).
  *
  * SUPPORTED_CANONICAL_RECORD_VERSIONS is the fail-closed evolution lever
  * for this record, the exact analogue of witness.js's
@@ -49,6 +52,14 @@ export const SUPPORTED_CANONICAL_RECORD_VERSIONS = new Set(['v1', 'v2']);
 export const PUBLISHED_VERDICT_BALANCED = 'balanced';
 /** Producer DETECTED drift — the record itself is evidence of a discrepancy. */
 export const PUBLISHED_DRIFT_VERDICTS = new Set(['out_of_tolerance', 'partial_drift']);
+/**
+ * Producer declares the reserve ABOVE the liability, with the surplus disclosed (BIPCircle
+ * decision D-183, a per-tenant producer policy). It is not drift and not a coverage gap: on
+ * complete data the only leg out of tolerance was bank vs ledger, and it was long. The
+ * verifier does not take the claim on trust — the verdict can reach PASS only when its OWN
+ * treasury check finds reserves >= supply for the cell, and a shortfall still FAILs.
+ */
+export const PUBLISHED_VERDICT_OVER_RESERVED = 'over_reserved';
 /** Producer could not fully verify (missing view / coverage) — not drift, not clean. */
 export const PUBLISHED_COVERAGE_VERDICTS = new Set(['partial_balanced', 'provider_unavailable']);
 

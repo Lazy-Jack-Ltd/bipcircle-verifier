@@ -27,6 +27,25 @@ Not published; no version bump yet.
   the registry refuses to load. A pinned entry naming no bank service FAILs with
   `REGISTRY_ENTRY_INCOMPLETE`.
 
+### Added — the `over_reserved` published verdict
+
+- The producer can now publish `over_reserved` (BIPCircle decision D-183, a per tenant policy):
+  on complete data the only leg out of tolerance was bank against ledger, and the reserve was
+  ABOVE the liability, so the issuer declares a surplus instead of reporting drift. The verifier
+  recognises it as its own verdict: it is neither `PUBLISHED_VERDICT_DRIFT` (FAIL) nor
+  `PUBLISHED_VERDICT_NOT_BALANCED` (INCONCLUSIVE).
+- The claim is not taken on trust. `over_reserved` can reach PASS only when the verifier's own
+  treasury comparison for the cell the record names finds reserves >= on-chain supply. A
+  shortfall still FAILs (`RESERVE_SHORTFALL[...]`), and so does a shortfall inside the cell
+  tolerance, which the plain supply check would pass (`PUBLISHED_OVER_RESERVED_CONTRADICTED`).
+  When the verifier's own comparison for that cell did not complete (`--skip-onchain`, an
+  unbound record, a cell config error) the verdict is INCONCLUSIVE
+  (`PUBLISHED_OVER_RESERVED_UNVERIFIED`).
+- `result.stages.record.overReserved` carries `declaredSurplus` (the record's delta, which for
+  this verdict is the disclosed surplus), the claimed figures, and `verified` with the surplus
+  this verifier found. The human report prints the declared surplus beside the verified one.
+- New export: `PUBLISHED_VERDICT_OVER_RESERVED`.
+
 ### Changed — `tvvin-sandbox` is pinned to its own bank service and key
 
 - **BREAKING for historic seals:** `tvvin-sandbox` now points at

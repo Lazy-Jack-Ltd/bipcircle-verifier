@@ -25,7 +25,8 @@ import crypto from 'node:crypto';
 import { buildCanonicalInput } from '../src/canonical.js';
 import { computeMerkleRootForVersion, leafDigest } from '../src/merkle.js';
 import { verify } from '../src/index.js';
-import { parseCanonicalRecord, bindRecordToCell, SUPPORTED_CANONICAL_RECORD_VERSIONS } from '../src/attestationRecord.js';
+import { parseCanonicalRecord, bindRecordToCell, SUPPORTED_CANONICAL_RECORD_VERSIONS, PUBLISHED_VERDICT_OVER_RESERVED } from '../src/attestationRecord.js';
+import { renderHuman } from '../src/report.js';
 import { _setForTests as setRegistryForTests, _resetForTests as resetRegistry } from '../src/tenantRegistry.js';
 
 const TENANT = 'tvvin-binding';
@@ -271,6 +272,73 @@ describe('canonical-record version discipline (SUPPORTED_CANONICAL_RECORD_VERSIO
     // Short GBP world: the unscoped fallback still finds the shortfall.
     assert.equal(r.verdict, 'FAIL');
     assert.ok(r.failures.some((f) => /RESERVE_SHORTFALL\[GBP\]/.test(f.reason)));
+  });
+});
+
+describe("published 'over_reserved' (BIPCircle D-183): a disclosed surplus, held to the verifier's own reserve check", () => {
+  const OVER = { verdict: 'over_reserved', onChain: '100.00', ledger: '100.00', bank: '10000000.00', delta: '9999900.00' };
+
+  test('the verdict token is recognised', () => {
+    assert.equal(PUBLISHED_VERDICT_OVER_RESERVED, 'over_reserved');
+  });
+
+  test('PASS when the verifier itself finds reserves >= supply; the claim is neither drift nor inconclusive', async () => {
+    const r = await run(makeWorld({ canonicalRecord: rec('ethereum-sepolia', EUR_CONTRACT, 'EUR', OVER) }));
+    assert.equal(r.verdict, 'PASS', `failures: ${JSON.stringify(r.failures)} inconclusive: ${JSON.stringify(r.inconclusive)}`);
+    assert.equal(r.stages.record.verdict, 'over_reserved');
+    assert.ok(!r.failures.some((f) => /PUBLISHED_VERDICT_DRIFT/.test(f.reason)));
+    assert.ok(!r.inconclusive.some((f) => /PUBLISHED_VERDICT_NOT_BALANCED/.test(f.reason)));
+    const over = r.stages.record.overReserved;
+    assert.equal(over.declared, true);
+    assert.equal(over.declaredSurplus, '9999900.00');
+    assert.equal(over.verified, true);
+    assert.equal(over.verifiedDeltaMinorUnits, '999990000'); // €10,000,000.00 - €100.00 at 2dp
+  });
+
+  test('PASS at exactly level: reserves == supply is not a shortfall', async () => {
+    const r = await run(makeWorld({ canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP', OVER), gbpReserve: '1000000.00' }));
+    assert.equal(r.verdict, 'PASS', JSON.stringify(r.failures));
+    assert.equal(r.stages.record.overReserved.verifiedDeltaMinorUnits, '0');
+  });
+
+  test('FAIL when the verifier finds a shortfall — the surplus claim is contradicted', async () => {
+    const r = await run(makeWorld({ canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP', OVER) }));
+    assert.equal(r.verdict, 'FAIL');
+    assert.ok(r.failures.some((f) => /RESERVE_SHORTFALL\[GBP\]/.test(f.reason)));
+    assert.ok(r.failures.some((f) => /PUBLISHED_OVER_RESERVED_CONTRADICTED/.test(f.reason)));
+    assert.equal(r.stages.record.overReserved.verified, false);
+  });
+
+  test('FAIL on a shortfall INSIDE the cell tolerance: the tolerance never turns a deficit into a surplus', async () => {
+    resetRegistry();
+    setRegistryForTests({ tenants: [{ tenantId: TENANT, bankServiceUrl: BANK_URL, xrplIssuerAddress: ISSUER, kidPattern: KID_PATTERN,
+      tokens: [{ ...TOKENS[0], toleranceMinorUnits: '100000' }, TOKENS[1]] }] });
+    const world = makeWorld({ canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP', OVER), gbpReserve: '999999.00' });
+    const r = await run(world);
+    assert.equal(r.stages.supply.cells[0].ok, true, 'CONTROL: the shortfall is inside tolerance, so the plain supply check passes');
+    assert.equal(r.verdict, 'FAIL');
+    assert.ok(r.failures.some((f) => /PUBLISHED_OVER_RESERVED_CONTRADICTED/.test(f.reason)));
+    // The same world with a balanced record passes: the extra FAIL is the surplus claim's alone.
+    const balanced = await run(makeWorld({ canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP'), gbpReserve: '999999.00' }));
+    assert.equal(balanced.verdict, 'PASS', JSON.stringify(balanced.failures));
+  });
+
+  test('INCONCLUSIVE when the verifier did not run its own reserve check', async () => {
+    const r = await run(makeWorld({ canonicalRecord: rec('ethereum-sepolia', EUR_CONTRACT, 'EUR', OVER) }), { skipOnChainSupply: true });
+    assert.equal(r.verdict, 'INCONCLUSIVE');
+    assert.ok(r.inconclusive.some((f) => /PUBLISHED_OVER_RESERVED_UNVERIFIED/.test(f.reason)));
+    assert.equal(r.stages.record.overReserved.verified, null);
+  });
+
+  test('the report prints the declared surplus, the claimed figures and what the verifier found', async () => {
+    const r = await run(makeWorld({ canonicalRecord: rec('ethereum-sepolia', EUR_CONTRACT, 'EUR', OVER) }));
+    const out = renderHuman(r, { network: 'testnet', txHash: TXHASH });
+    assert.match(out, /published verdict:\s+over_reserved/);
+    assert.match(out, /claimed bank:\s+10000000\.00 EUR/);
+    assert.match(out, /declared surplus:\s+9999900\.00 EUR \(issuer declares reserves ABOVE liabilities; not drift\)/);
+    assert.match(out, /verified surplus:\s+€9,999,900\.00/);
+    const bad = await run(makeWorld({ canonicalRecord: rec('ethereum-sepolia', GBP_CONTRACT, 'GBP', OVER) }));
+    assert.match(renderHuman(bad, { network: 'testnet', txHash: TXHASH }), /verified surplus:\s+CONTRADICTED/);
   });
 });
 

@@ -103,6 +103,19 @@ export function renderHuman(result, { network = 'mainnet', txHash } = {}) {
     L.push(`    claimed ledger:     ${claim(rec.claimed.ledger)}`);
     L.push(`    claimed bank:       ${claim(rec.claimed.bank)}`);
     L.push(`    claimed delta:      ${rec.claimed.delta === null ? 'not committed' : rec.claimed.delta}`);
+    // 'over_reserved' (BIPCircle D-183): the issuer declares reserves ABOVE liabilities
+    // and discloses the surplus. Shown next to what THIS verifier found for the cell.
+    const over = rec.overReserved;
+    if (over) {
+      L.push(`    declared surplus:   ${over.declaredSurplus === null ? 'not committed' : `${over.declaredSurplus} ${rec.currency}`} (issuer declares reserves ABOVE liabilities; not drift)`);
+      if (over.verified === true) {
+        L.push(`    verified surplus:   ${formatMinor(over.verifiedDeltaMinorUnits, over.verifiedDecimals ?? 0, rec.currency)} (this verifier: reserves >= supply)`);
+      } else if (over.verified === false) {
+        L.push(`    verified surplus:   CONTRADICTED — this verifier finds reserves below supply`);
+      } else {
+        L.push('    verified surplus:   NOT VERIFIED — the reserve comparison for this cell did not complete');
+      }
+    }
   } else if (rec && rec.present && !rec.ok) {
     L.push(`  attestation record (Memo 1): NOT USABLE (${rec.error}) — see NOT VERIFIED below`);
   } else if (rec && !rec.present) {

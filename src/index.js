@@ -60,6 +60,7 @@ import {
   resolveCellCurrency,
   PUBLISHED_VERDICT_BALANCED,
   PUBLISHED_DRIFT_VERDICTS,
+  PUBLISHED_VERDICT_OVER_RESERVED,
 } from './attestationRecord.js';
 import {
   getEthereumErc20TotalSupply,
@@ -275,7 +276,18 @@ export async function verify({
       };
       // Surface the PUBLISHED verdict — a non-'balanced' record must never
       // yield a quiet PASS (finding 12, item 2).
-      if (record.verdict !== PUBLISHED_VERDICT_BALANCED) {
+      // 'over_reserved' (BIPCircle D-183) claims reserves ABOVE liabilities with the
+      // surplus disclosed: not drift, not a coverage gap. It is held to the verifier's
+      // own treasury comparison after Stage 6 instead (reserves >= supply, or FAIL).
+      if (record.verdict === PUBLISHED_VERDICT_OVER_RESERVED) {
+        result.stages.record.overReserved = {
+          declared: true,
+          // The producer's delta is the absolute bank-vs-ledger gap, which for this
+          // verdict IS the surplus it disclosed. A claim, never a comparison input.
+          declaredSurplus: record.claimed.delta,
+          claimed: record.claimed,
+        };
+      } else if (record.verdict !== PUBLISHED_VERDICT_BALANCED) {
         if (PUBLISHED_DRIFT_VERDICTS.has(record.verdict)) {
           result.failures.push({
             stage: 'record',
@@ -697,6 +709,35 @@ export async function verify({
       reportClass: record ? record.reportClass : null,
       cells,
     };
+  }
+
+  // 'over_reserved' — the issuer claims a surplus. The claim can only stand if THIS
+  // verifier's own comparison for the cell the record names found reserves >= supply.
+  // compareReservesVsSupply passes a shortfall inside the cell tolerance, so the sign is
+  // checked here as well: a surplus claim over a (tolerated) shortfall is contradicted.
+  // A check that did not run for the named cell leaves the verdict INCONCLUSIVE.
+  if (record && record.verdict === PUBLISHED_VERDICT_OVER_RESERVED) {
+    const verifiedCell = result.stages.supply?.verifiedCell ?? null;
+    const cell = verifiedCell ? (result.stages.supply.cells || []).find((c) => c.currency === verifiedCell) : null;
+    const over = result.stages.record.overReserved;
+    if (!cell) {
+      over.verified = null;
+      result.inconclusive.push({
+        stage: 'record',
+        reason: `PUBLISHED_OVER_RESERVED_UNVERIFIED: the anchored record declares reserves ABOVE liabilities for the ${record.currency} cell, but this verifier did not complete its own reserve comparison for that cell, so the surplus claim is not verified. The verdict cannot be PASS.`,
+      });
+    } else if (BigInt(cell.deltaMinorUnits) < 0n) {
+      over.verified = false;
+      over.verifiedDeltaMinorUnits = cell.deltaMinorUnits;
+      result.failures.push({
+        stage: 'record',
+        reason: `PUBLISHED_OVER_RESERVED_CONTRADICTED: the anchored record declares reserves ABOVE liabilities for the ${record.currency} cell (declared surplus ${record.claimed.delta ?? 'not committed'}), but this verifier finds reserves=${cell.reservesMinorUnits} < on-chain supply=${cell.onChainSupplyMinorUnits} (minor units at ${cell.decimals}dp). The published surplus is not supported by the evidence.`,
+      });
+    } else {
+      over.verified = true;
+      over.verifiedDeltaMinorUnits = cell.deltaMinorUnits;
+      over.verifiedDecimals = cell.decimals;
+    }
   }
 
   // Verdict precedence: any failure → FAIL; else any unperformed check →
