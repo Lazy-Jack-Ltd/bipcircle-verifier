@@ -5,7 +5,7 @@
  *
  *   1. REGISTERED-TENANT mode (preferred): pass `tenantId` whose entry
  *      lives in src/tenants.json. The verifier loads the pinned
- *      bankServiceUrl + xrplIssuerAddress + kidPattern + token config
+ *      bank services (url + kidPattern each) + publishing account + token config
  *      from the registry. Trust roots come from the verifier source
  *      release, NOT user input — this closes Pro audit F1+F2 (user-
  *      supplied URL / TX-from-any-account spoofing).
@@ -28,9 +28,10 @@
  *      to the PASS/FAIL comparison — re-derivation stays independent.
  *   2. fetchAndValidateWitness — pull witness JSON, validate SHA-256
  *      + claimed Merkle root + schema.
- *   3. fetchJwks(bankServiceUrl) — pull bank-service JWKS. Validate
- *      that the kid in seal.publicKeyId matches the tenant's
- *      kidPattern. (F1 fix.)
+ *   3. fetchJwks per pinned bank service — each seal is attributed to
+ *      the one bank service whose kidPattern matches its publicKeyId,
+ *      and every kid that service advertises must match its pattern.
+ *      (F1 fix; multi-bank since registry schema v5.)
  *   4. verifySealSignatures — ECDSA-verify each seal.
  *   5. computeMerkleRoot — rebuild root from leaves; compare to
  *      witness's claimed root.
@@ -52,7 +53,7 @@ import { fetchAndValidateWitness } from './witness.js';
 import { fetchJwks } from './keys.js';
 import { verifySealSignatures } from './sigverify.js';
 import { computeMerkleRootForVersion } from './merkle.js';
-import { lookupTenant } from './tenantRegistry.js';
+import { lookupTenant, resolveBankServiceForKid } from './tenantRegistry.js';
 import {
   parseCanonicalRecord,
   bindRecordToCell,
@@ -119,7 +120,9 @@ export async function verify({
       return result;
     }
     trustRoots = {
-      bankServiceUrl: t.bankServiceUrl,
+      // v5 registry: one entry per bank service ({ url, kidPattern }); the
+      // v4 single bankServiceUrl + kidPattern arrives here as a 1-element list.
+      bankServices: t.bankServices,
       // v0.7.0 — the account the attestation tx must be SIGNED BY. Formerly
       // (mis)named xrplIssuerAddress; the registry loader resolves the alias.
       // This is NOT the token issuer — that lives on tokens[].issuer and is
@@ -127,7 +130,6 @@ export async function verify({
       xrplPublishingAccount: t.xrplPublishingAccount,
       // v0.7.0 — the BIPCircle platform tenant id the witness must name.
       bipcircleTenantId: t.bipcircleTenantId,
-      kidRegex: t._kidRegex,
       // v2 registry shape: tokens[] (multi-chain). tenantRegistry.js
       // back-compat-maps the old single `token` to a 1-element array
       // so reads here always see an array.
@@ -138,6 +140,14 @@ export async function verify({
     // below silently reject every account against `null`, which would read as
     // "this tx came from the wrong account" — blaming the transaction for a
     // hole in this file.
+    if (trustRoots.bankServices.length === 0) {
+      result.failures.push({
+        stage: 'registry',
+        reason: `REGISTRY_ENTRY_INCOMPLETE: pinned tenant '${tenantId}' names no bank service (neither bankServices[] nor bankServiceUrl), so there is no JWKS to verify a seal against. This is a defect in the verifier's own registry, NOT evidence about the transaction. Fix src/tenants.json and cut a release.`,
+      });
+      result.verdict = 'FAIL';
+      return result;
+    }
     if (!trustRoots.xrplPublishingAccount) {
       result.failures.push({
         stage: 'registry',
@@ -164,14 +174,14 @@ export async function verify({
       return result;
     }
     trustRoots = {
-      bankServiceUrl: unsafeBankServiceUrl,
+      // One bank service with no kid pattern: every seal is checked against it.
+      bankServices: [{ url: unsafeBankServiceUrl, kidPattern: null, _kidRegex: null }],
       xrplPublishingAccount: unsafeIssuer,
       // No pinned platform tenant id in override mode, so the witness-tenant
       // binding below cannot run. tokens[] is empty by construction, so the
       // supply stage never runs either and the verdict is capped at
       // INCONCLUSIVE — an override can never reach PASS.
       bipcircleTenantId: null,
-      kidRegex: null,
       tokens: [],
     };
     result.mode = 'unsafe-override';
@@ -209,10 +219,10 @@ export async function verify({
     result.verdict = 'FAIL';
     return result;
   }
-  if (trustRoots.kidRegex && memo.bankServicePublicKeyId && !trustRoots.kidRegex.test(memo.bankServicePublicKeyId)) {
+  if (memo.bankServicePublicKeyId && resolveBankServiceForKid(trustRoots.bankServices, memo.bankServicePublicKeyId).reason !== 'ok') {
     result.failures.push({
       stage: 'xrpl',
-      reason: `MEMO_KID_MISMATCH: Memo 5 references bankServicePublicKeyId='${memo.bankServicePublicKeyId}' which does not match the tenant's pinned kidPattern. Possible attacker-controlled tx.`,
+      reason: `MEMO_KID_MISMATCH: Memo 5 references bankServicePublicKeyId='${memo.bankServicePublicKeyId}' which does not match exactly one of the tenant's pinned bank-service kidPatterns. Possible attacker-controlled tx.`,
     });
     result.verdict = 'FAIL';
     return result;
@@ -340,21 +350,51 @@ export async function verify({
     });
   }
 
-  // Stage 3: JWKS + kid pattern binding
+  // Stage 3: JWKS + kid pattern binding, per bank service (v5 registry).
+  //
+  // Each seal is attributed to the ONE pinned bank service whose kidPattern
+  // matches the kid it carries, and only the JWKS of the services the witness
+  // actually uses are fetched (a second bank's outage does not fail a day that
+  // holds no seal from it). Every kid a service advertises must match THAT
+  // service's pattern, so a key can only ever verify seals attributed to the
+  // service that published it: a kid matching two services' patterns is
+  // refused as ambiguous rather than resolved by fetch order.
   let jwksByKid;
   try {
-    jwksByKid = await fetchJwks({ bankServiceUrl: trustRoots.bankServiceUrl, fetchImpl });
-    if (trustRoots.kidRegex) {
-      for (const kid of jwksByKid.keys()) {
-        if (!trustRoots.kidRegex.test(kid)) {
+    const used = new Map(); // url -> { service, sealCount }
+    for (const seal of witness.seals) {
+      const { service, reason } = resolveBankServiceForKid(trustRoots.bankServices, seal.publicKeyId);
+      if (!service) {
+        throw new Error(reason === 'ambiguous'
+          ? `SEAL_KID_AMBIGUOUS: seal '${seal.eventId}' carries kid '${seal.publicKeyId}', which matches more than one pinned bank service's kidPattern. The registry cannot say which bank signed it.`
+          : `SEAL_KID_NOT_PINNED: seal '${seal.eventId}' carries kid '${seal.publicKeyId}', which matches none of the tenant's pinned bank services. Possible attacker-controlled key or an unpinned bank.`);
+      }
+      const u = used.get(service.url) || { service, sealCount: 0 };
+      u.sealCount += 1;
+      used.set(service.url, u);
+    }
+    if (used.size === 0) {
+      for (const service of trustRoots.bankServices) used.set(service.url, { service, sealCount: 0 });
+    }
+    jwksByKid = new Map();
+    const services = [];
+    for (const { service, sealCount } of used.values()) {
+      const keys = await fetchJwks({ bankServiceUrl: service.url, fetchImpl });
+      for (const [kid, key] of keys) {
+        if (service._kidRegex && !service._kidRegex.test(kid)) {
           throw new Error(
-            `JWKS_KID_PATTERN_MISMATCH: JWKS advertised kid '${kid}' that does not match the tenant's pinned pattern. ` +
+            `JWKS_KID_PATTERN_MISMATCH: JWKS at ${service.url} advertised kid '${kid}' that does not match that bank service's pinned pattern. ` +
             `Refusing to trust this JWKS — possible attacker-controlled bank-service URL.`,
           );
         }
+        if (jwksByKid.has(kid)) {
+          throw new Error(`JWKS_KID_COLLISION: kid '${kid}' is advertised by more than one pinned bank service. Refusing to guess which key it names.`);
+        }
+        jwksByKid.set(kid, key);
       }
+      services.push({ url: service.url, keyCount: keys.size, kids: [...keys.keys()], sealCount });
     }
-    result.stages.jwks = { ok: true, keyCount: jwksByKid.size, kids: [...jwksByKid.keys()] };
+    result.stages.jwks = { ok: true, keyCount: jwksByKid.size, kids: [...jwksByKid.keys()], services };
   } catch (err) {
     result.failures.push({ stage: 'jwks', reason: err.message });
     result.verdict = 'FAIL';

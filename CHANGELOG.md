@@ -7,6 +7,35 @@ All notable changes to `@lazyjackorg/bipcircle-verifier`.
 > never published, so no third party has ever run them. 0.7.0 is therefore the first
 > release to carry the 0.5.0 and 0.6.0 work, and the notes for all three are below.
 
+## [Unreleased]
+
+Not published; no version bump yet.
+
+### Added — several bank services per pin (registry schema v5)
+
+- A pin may list `bankServices[]`, each `{ url, kidPattern }`. A seal is verified against the
+  ONE bank service whose `kidPattern` matches the kid it carries; a pooled key set is never used.
+  Only the JWKS of services the witness actually uses are fetched, so one bank's outage does not
+  fail a day that holds no seal from it.
+- New failures: `SEAL_KID_NOT_PINNED` (a seal's kid matches no pinned service),
+  `SEAL_KID_AMBIGUOUS` (it matches more than one), `JWKS_KID_COLLISION` (two services advertise
+  the same kid). `JWKS_KID_PATTERN_MISMATCH` now names the service whose JWKS broke its pattern.
+  `result.stages.jwks.services` lists each fetched service with its key and seal counts.
+- The v4 single `bankServiceUrl` + `kidPattern` shape is still read as a one-element list.
+  An entry setting both shapes must repeat the single pair inside `bankServices[]`; otherwise,
+  or with several services and one lacking a `kidPattern`, a duplicated url or an empty list,
+  the registry refuses to load. A pinned entry naming no bank service FAILs with
+  `REGISTRY_ENTRY_INCOMPLETE`.
+
+### Changed — `tvvin-sandbox` is pinned to its own bank service and key
+
+- **BREAKING for historic seals:** `tvvin-sandbox` now points at
+  `https://bank-service-tvvin-sandbox-390262355925.europe-west2.run.app` with kid pattern
+  `.../cryptoKeys/tvvin-sandbox-signer/cryptoKeyVersions/N`, instead of the shared
+  `bank-service-tvvin` deployment and its `tvvin-signer` key. The pin no longer shares a signing
+  key with any other deployment. Seals signed by `tvvin-signer` do not verify under this pin; an
+  attestation published before the repoint needs a 0.7.x verifier.
+
 ## [0.7.0] — 2026-09-20
 
 **The registry conflated two on-chain identities, and every genuine attestation failed because of it.**

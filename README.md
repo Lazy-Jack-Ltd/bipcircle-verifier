@@ -42,13 +42,13 @@ Drop `--eth-rpc-url` and pass `--skip-onchain` to run the integrity stages witho
 
 ## Pinned tenants in this build
 
-Run `bipcircle-verify --help` to see the live list. As of this README (matching `src/tenants.json`, schema v4, 2026-09-20):
+Run `bipcircle-verify --help` to see the live list. As of this README (matching `src/tenants.json`, schema v5, 2026-09-27; unreleased):
 
 - **`tvvin-sandbox`** — testnet/Sepolia stablecoin issuer, one pinned GBP cell
   - **XRPL publishing account** (signs the attestation tx, testnet): `rL78qvWguiRiTjkwX4m8WfXaA84Te1ju2u`
   - **XRPL token issuer** (its obligations are the on-ledger supply): `rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34`
   - **Ethereum (Sepolia) token contract**: `0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE`
-  - Bank-service URL: `https://bank-service-tvvin-yrikeqyelq-nw.a.run.app`
+  - Bank service: `https://bank-service-tvvin-sandbox-390262355925.europe-west2.run.app`, signing key `cryptoKeys/tvvin-sandbox-signer` (its own deployment and key since 2026-09-27; previously the shared `bank-service-tvvin` and `tvvin-signer`)
   - BIPCircle platform tenant (must match the witness): `tvvin-sandbox`
 
 > **Those first three are three different things.** The publishing account signs the attestation and issues nothing. The token issuer issues TVV and signs nothing. The contract is an EVM address and is neither. Through v0.6.0 the registry pinned the *token issuer* as the account attestations must come from, so every genuine attestation failed the account check — see `THREE_SEPARATE_IDENTITIES` in `src/tenants.json` before editing any of them.
@@ -143,10 +143,10 @@ Exit codes: `0` PASS, `1` FAIL, `2` invocation error, `3` INCONCLUSIVE (no check
 
 1. **Registry resolution** — looks up the pinned trust roots for `--tenant` OR validates `--unsafe-*` overrides.
 2. **XRPL transaction** — fetches the tx by hash via public JSON-RPC. **Validates `tx.Account === pinned issuer`** (closes Pro F2 cross-account spoofing). Parses Memo 5 (`reserve-verifier-v1`).
-3. **Memo kid binding** — verifies the `bankServicePublicKeyId` in Memo 5 matches the tenant's pinned `kidPattern` (closes Pro F1 attacker-controlled URL).
+3. **Memo kid binding** — verifies the `bankServicePublicKeyId` in Memo 5 matches the `kidPattern` of exactly one of the tenant's pinned bank services (closes Pro F1 attacker-controlled URL).
 3b. **Canonical record (Memo 1)** — parses the eleven-field `treasury-attestation-v1` record in the same tx (`version|asOfDate|chain|tokenKey|currency|verdict|onChain|ledger|bank|delta|reportId`) and binds this transaction to the currency cell it names, cross-checked against the pinned registry (a disagreement is a loud `CELL_BINDING_MISMATCH` FAIL). A published verdict of `out_of_tolerance`/`partial_drift` FAILs (the issuer's own record declares drift); `partial_balanced`/`provider_unavailable`/unknown verdicts are `INCONCLUSIVE`. `chain === 'combined'` marks a per-currency cross-chain row — it is verified as the whole cell and labelled. Historic `v1` records (anchored 2026-05-23..2026-07-29) carry the literal `null` for the bank and delta positions — "never committed", which is a different claim from `0`; they verify normally and the nulls are surfaced as "not committed", never coerced to zero. A missing/unusable record means the verdict cannot be bound to a cell: every registry cell is checked instead and the verdict is at best `INCONCLUSIVE`. `SUPPORTED_CANONICAL_RECORD_VERSIONS` (v1, v2) is the record's fail-closed evolution lever, exactly like Memo 5's `SUPPORTED_PROTOCOL_VERSIONS`.
 4. **Witness file** — HTTPS GET. Validates SHA-256 of the bytes against `witnessSha256` in Memo 5. Schema check.
-5. **Bank-service JWKS** — fetches `/.well-known/bank-service-keys` from the **pinned** bankServiceUrl. Validates every advertised `kid` matches the tenant's `kidPattern`. Rejects duplicate kids; pins `alg=ES256`.
+5. **Bank-service JWKS** — attributes each seal to the ONE pinned bank service whose `kidPattern` matches the kid it carries (a kid matching none is `SEAL_KID_NOT_PINNED`, one matching several is `SEAL_KID_AMBIGUOUS`), then fetches `/.well-known/bank-service-keys` from each bank service the witness uses. Validates every advertised `kid` matches that service's `kidPattern`, and that no kid is advertised by two services (`JWKS_KID_COLLISION`). Rejects duplicate kids; pins `alg=ES256`.
 6. **Seal signatures** — for every seal in the witness, decodes the canonical input and ECDSA-verifies the signature against the matching public key.
 7. **Merkle root** — re-builds the Merkle root from leaf digests; compares to Memo 5's anchored root.
 8. **On-chain supply, scoped to the named currency cell** — groups the tenant's tokens by their cell currency (`reserveCurrency`) and verifies the cell the transaction's record names (all cells when the record is unusable): the cell's tokens' on-chain supplies are summed and compared to the bank-side balances **in that currency only**. Reports `✓ fully backed` or `RESERVE_SHORTFALL[<currency>]`. Tolerances never cross a cell boundary. Several accounts at one bank each count once (dedup key is currency + provider + account reference). If this stage is skipped (`--skip-onchain`), has no token config, names a cell the registry doesn't pin, or a token's cell currency cannot be resolved, the verdict is `INCONCLUSIVE` — never `PASS`.
@@ -201,9 +201,13 @@ Tenants are pinned in source: every release embeds the registry available at rel
    {
      "tenantId": "your-pin-name",
      "bipcircleTenantId": "your-platform-tenant-id",
-     "bankServiceUrl": "https://bank-service-your-tenant.run.app",
+     "bankServices": [
+       {
+         "url": "https://bank-service-your-tenant.run.app",
+         "kidPattern": "^projects/your-gcp-project/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/your-tenant-signer/cryptoKeyVersions/\\d+$"
+       }
+     ],
      "xrplPublishingAccount": "rTheAccountThatSIGNSTheAttestationTx...",
-     "kidPattern": "^projects/your-gcp-project/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/your-tenant-signer/cryptoKeyVersions/\\d+$",
      "tokens": [
        {
          "label": "MyStable-ETH-Sepolia",
@@ -232,6 +236,8 @@ Tenants are pinned in source: every release embeds the registry available at rel
    Every token entry should carry `reserveCurrency` — the fiat currency of the legally segregated cell the token belongs to. The verifier groups tokens by `reserveCurrency` and verifies each cell's summed supply against ONLY that currency's bank reserves; per-token supplies are reported individually so a reviewer can see which chain contributes how much of each cell's liability. `currency` keeps its per-chain meaning: fiat denomination for `ethereum` tokens (used as a legacy `reserveCurrency` fallback), on-ledger ticker for `xrpl` tokens (used for `gateway_balances` — never a cell key, so `reserveCurrency` is REQUIRED there). A token with no resolvable cell currency makes the verdict `INCONCLUSIVE`.
 
    The older `token` (single object) shape is still accepted on read for back-compat. New entries should use `tokens[]`.
+
+   **Several banks.** A reserve held at several banks is read through one bank-service deployment per bank, each with its own signing key: list each under `bankServices[]` with its own `url` and `kidPattern`. With more than one service every entry needs a `kidPattern`, and the patterns must not overlap on any kid a seal carries. The single `bankServiceUrl` + `kidPattern` shape (schema v4) is still read as a one-element list; an entry that sets both shapes must repeat the single pair inside `bankServices[]`, otherwise it is refused at load.
 
 2. Cut a new verifier release (bump the patch or minor). External verifiers upgrade when ready.
 

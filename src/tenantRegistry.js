@@ -18,6 +18,9 @@
  *     silently dropping the F2 gate on an older third-party entry would be
  *     worse than carrying the alias; an entry setting BOTH to different
  *     values is rejected at load rather than guessed.
+ *   - bankServices[] (schema v5): { url, kidPattern } per bank service.
+ *     The v4 single `bankServiceUrl` + `kidPattern` is read as a
+ *     one-element list (see normaliseBankServices).
  *   - kidPattern: a regex matching the expected KMS
  *     CryptoKeyVersion resource name pattern for this tenant's
  *     bank-service signing key (defends Pro F1 by binding the JWKS
@@ -79,11 +82,87 @@ function normaliseTenant(t) {
 
   return {
     ...t,
-    _kidRegex: t.kidPattern ? new RegExp(t.kidPattern) : null,
+    bankServices: normaliseBankServices(t),
     tokens: normalisedTokens,
     xrplPublishingAccount: pub || alias || null,
     bipcircleTenantId: t.bipcircleTenantId || t.tenantId,
   };
+}
+
+/**
+ * Resolve an entry's bank services (schema v5, multi-bank).
+ *
+ * A reserve can sit at several banks, each read through its OWN bank-service
+ * deployment with its OWN signing key. `bankServices[]` lists them, each with
+ * a `url` and a `kidPattern`; a seal is verified against the bank service
+ * whose kidPattern matches the kid it carries, never against a pooled key set.
+ *
+ * The v4 single-service shape (`bankServiceUrl` + `kidPattern` at the top of
+ * the entry) is still read, as a one-element list. An entry that sets BOTH
+ * shapes must repeat the legacy pair verbatim inside `bankServices[]`; any
+ * other combination names two trust roots for one slot and is refused at load
+ * rather than guessed (the same rule as xrplIssuerAddress).
+ *
+ * With more than one service every entry must carry a kidPattern: without it
+ * there is no way to say which bank service a seal belongs to.
+ */
+function normaliseBankServices(t) {
+  const legacy = t.bankServiceUrl
+    ? { url: t.bankServiceUrl, kidPattern: t.kidPattern ?? null }
+    : null;
+  if (!legacy && t.kidPattern && !Array.isArray(t.bankServices)) {
+    throw new Error(`tenantRegistry: tenant '${t.tenantId}' sets kidPattern with no bankServiceUrl; a key pattern needs the bank service it belongs to.`);
+  }
+  let list;
+  if (Array.isArray(t.bankServices)) {
+    if (t.bankServices.length === 0) {
+      throw new Error(`tenantRegistry: tenant '${t.tenantId}' has an empty bankServices[]; list at least one bank service or remove the field.`);
+    }
+    list = t.bankServices.map((s, i) => {
+      if (!s || typeof s.url !== 'string' || s.url.length === 0) {
+        throw new Error(`tenantRegistry: tenant '${t.tenantId}' bankServices[${i}] has no url.`);
+      }
+      return { url: s.url, kidPattern: s.kidPattern ?? null, label: s.label ?? null };
+    });
+    if (legacy && !list.some((s) => s.url === legacy.url && s.kidPattern === legacy.kidPattern)) {
+      throw new Error(
+        `tenantRegistry: tenant '${t.tenantId}' sets the single-service bankServiceUrl/kidPattern AND bankServices[], `
+        + `and the single pair ('${legacy.url}', '${legacy.kidPattern}') is not one of the listed services. `
+        + `The two shapes disagree about a trust root; remove bankServiceUrl/kidPattern or make them match an entry.`,
+      );
+    }
+  } else {
+    list = legacy ? [legacy] : [];
+  }
+  const urls = new Set();
+  for (const s of list) {
+    if (urls.has(s.url)) {
+      throw new Error(`tenantRegistry: tenant '${t.tenantId}' lists bank service '${s.url}' twice.`);
+    }
+    urls.add(s.url);
+    if (list.length > 1 && !s.kidPattern) {
+      throw new Error(
+        `tenantRegistry: tenant '${t.tenantId}' lists ${list.length} bank services but '${s.url}' has no kidPattern, `
+        + `so a seal could not be attributed to one of them.`,
+      );
+    }
+  }
+  return list.map((s) => ({ ...s, _kidRegex: s.kidPattern ? new RegExp(s.kidPattern) : null }));
+}
+
+/**
+ * The bank service a kid belongs to: the ONE service whose kidPattern matches
+ * it. A lone service without a pattern (unsafe-override mode) takes every kid.
+ *
+ * @returns {{ service: object|null, reason: 'ok'|'not-pinned'|'ambiguous' }}
+ */
+export function resolveBankServiceForKid(bankServices, kid) {
+  if (bankServices.length === 1 && !bankServices[0]._kidRegex) {
+    return { service: bankServices[0], reason: 'ok' };
+  }
+  const matches = bankServices.filter((s) => s._kidRegex && typeof kid === 'string' && s._kidRegex.test(kid));
+  if (matches.length === 1) return { service: matches[0], reason: 'ok' };
+  return { service: null, reason: matches.length === 0 ? 'not-pinned' : 'ambiguous' };
 }
 
 function buildRegistry(parsed, source) {

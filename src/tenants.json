@@ -1,8 +1,8 @@
 {
   "_meta": {
     "description": "Pinned trust roots for the bipcircle-verifier. Trust roots live HERE, in verifier source, and never come from a CLI argument — that is audit findings F1 (user-supplied bank-service URL) and F2 (attestation tx accepted from any account). Onboarding or repointing a deployment is a PR to this file plus a release; verifiers in the field upgrade deliberately.",
-    "schemaVersion": "v4",
-    "lastUpdated": "2026-09-20",
+    "schemaVersion": "v5",
+    "lastUpdated": "2026-09-27",
 
     "THREE_SEPARATE_IDENTITIES": "The single most important rule in this file. A deployment has THREE distinct on-chain identities and they are NEVER the same value. Collapsing any two of them is how a verifier starts proving the wrong thing. They are: (1) xrplPublishingAccount — the XRPL account the daily attestation AccountSet transaction is SIGNED BY and sent FROM. Producer side this is `fund_tenants/{id}.xrplAttestationWallet.address`, a per-tenant KMS-encrypted anchor wallet that holds no tokens and issues nothing. It is the F2 trust root: tx.Account must equal it. (2) tokens[].issuer — the XRPL account that ISSUES a token; its `gateway_balances` obligations ARE the circulating on-ledger supply. (3) tokens[].contract — the ERC-20 contract address on an EVM chain, whose totalSupply() is that leg's supply. One is a signer, one is an XRPL issuer, one is an EVM contract. They answer different questions and are read by different code paths.",
 
@@ -12,7 +12,7 @@
 
     "WHY_ONLY_tvvin_sandbox": "`tvvin-sandbox` is the deployment that actually publishes: staging.bipcircle.com → bipcircle-api-test → the `bipcircle-staging` Firestore database. The old `tvvin` pin has been REMOVED rather than repaired. It named the `(default)`-database deployment but had been repointed to staging's ETH token while keeping the token issuer as its publishing account — it could not verify a transaction from either deployment. A pin name that maps to trust roots which verify nothing is worse than no pin at all, because it reads as coverage. Historic transactions published by the `(default)` deployment's anchor wallet rat8BjsVkGpWS44tg89QxMmNWjgduw6Ym4 (e.g. 7753CF92C7C017D2C9C721F1A72F3BEA55030DD655D6377E7750C757FB711E57) consequently FAIL the F2 account check under this registry. That is correct and intended: they are not tvvin-sandbox attestations. Re-adding a `tvvin` pin means sourcing that deployment's real xrplAttestationWallet.address and its own token set — not reusing anything below.",
 
-    "schemaNotes": "v4 (2026-09-20) renames `xrplIssuerAddress` → `xrplPublishingAccount` (alias still read) and adds `bipcircleTenantId`, which is enforced against the witness file's tenantId. v3 added `reserveCurrency` per token: the fiat currency of the legally segregated CELL the token belongs to (the issuer is a protected cell company — one currency per cell, no cross-cell netting). The verifier groups tokens by reserveCurrency and verifies each cell against ONLY its own currency's bank reserves. `currency` keeps its per-chain meaning: fiat denomination for ethereum tokens, ON-LEDGER TICKER for xrpl tokens (used for gateway_balances). reserveCurrency is REQUIRED for xrpl tokens (their ticker is not a fiat currency); ethereum tokens without it fall back to `currency`, but new entries should always set it explicitly. A token whose cell currency cannot be resolved makes the verdict INCONCLUSIVE, never PASS. v2 introduced tokens[] (array); v1 used `token` (object) — both older shapes still load.",
+    "schemaNotes": "v5 (2026-09-27) adds `bankServices[]`: a pin may list several bank services, each `{ url, kidPattern }`, because a reserve held at several banks is read through one bank-service deployment per bank, each with its own signing key. A seal is verified against the ONE bank service whose kidPattern matches the kid it carries; only the services the witness actually uses are fetched; a kid matching two services' patterns, or advertised by two services, is refused rather than resolved. The v4 single-service shape (`bankServiceUrl` + `kidPattern` on the entry) is still read as a one-element list; an entry that sets both shapes must repeat the single pair inside `bankServices[]`, otherwise it is refused at load. With more than one service every service needs a kidPattern. v4 (2026-09-20) renames `xrplIssuerAddress` → `xrplPublishingAccount` (alias still read) and adds `bipcircleTenantId`, which is enforced against the witness file's tenantId. v3 added `reserveCurrency` per token: the fiat currency of the legally segregated CELL the token belongs to (the issuer is a protected cell company — one currency per cell, no cross-cell netting). The verifier groups tokens by reserveCurrency and verifies each cell against ONLY its own currency's bank reserves. `currency` keeps its per-chain meaning: fiat denomination for ethereum tokens, ON-LEDGER TICKER for xrpl tokens (used for gateway_balances). reserveCurrency is REQUIRED for xrpl tokens (their ticker is not a fiat currency); ethereum tokens without it fall back to `currency`, but new entries should always set it explicitly. A token whose cell currency cannot be resolved makes the verdict INCONCLUSIVE, never PASS. v2 introduced tokens[] (array); v1 used `token` (object) — both older shapes still load.",
 
     "decimalsNote": "`decimals` is the scale used to convert a chain's reported supply into integer minor units. For an ERC-20 it is the contract's own decimals(). For an XRPL issued currency there is no on-ledger decimals field — gateway_balances returns a decimal string with up to 15 significant digits — so this value must be at least as large as the fractional precision the ledger actually carries, or the conversion cannot be done exactly. It is a PRECISION CEILING, not a display preference: over-stating it is harmless (the cell rebases to the widest token in the cell), under-stating it makes the cell unverifiable. TVV is pinned at 6 because live obligations carry 2 (e.g. 2191947.52) and 6 leaves headroom without approaching the 15-significant-digit limit."
   },
@@ -20,13 +20,18 @@
     {
       "tenantId": "tvvin-sandbox",
       "bipcircleTenantId": "tvvin-sandbox",
-      "bankServiceUrl": "https://bank-service-tvvin-yrikeqyelq-nw.a.run.app",
+      "bankServices": [
+        {
+          "label": "bank-service-tvvin-sandbox",
+          "url": "https://bank-service-tvvin-sandbox-390262355925.europe-west2.run.app",
+          "kidPattern": "^projects/bipcircle/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/tvvin-sandbox-signer/cryptoKeyVersions/\\d+$"
+        }
+      ],
+      "_bankServicesNote": "Repointed 2026-09-27 from the shared bank-service-tvvin deployment (key cryptoKeys/tvvin-signer) to tvvin-sandbox's own deployment and own KMS key, so this pin no longer shares a signing key with any other deployment. Seals signed by tvvin-signer do not verify under this pin; any tvvin-sandbox attestation published before the repoint needs a 0.7.x verifier. Add a bank here, with its own url and kidPattern, when the tenant reads a reserve account through a second bank-service deployment.",
 
       "_identityNote": "xrplPublishingAccount SIGNS the attestation transaction and issues nothing. tokens[].issuer ISSUES TVV and signs nothing. tokens[].contract is an EVM contract and is neither. Three values, three roles — see THREE_SEPARATE_IDENTITIES above before editing any of them.",
       "xrplPublishingAccount": "rL78qvWguiRiTjkwX4m8WfXaA84Te1ju2u",
 
-      "kidPattern": "^projects/bipcircle/locations/europe-west2/keyRings/bank-service-signers/cryptoKeys/tvvin-signer/cryptoKeyVersions/\\d+$",
-      "_kidPatternNote": "The bank-service signing key is shared with any other deployment served by the same bank-service (there is exactly one bank-service and one signing key today). The kid pattern therefore does NOT distinguish deployments on its own — bipcircleTenantId, enforced against the witness, is what does.",
 
       "tokens": [
         {
