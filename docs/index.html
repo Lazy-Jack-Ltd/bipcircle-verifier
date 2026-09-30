@@ -43,11 +43,11 @@
 // Pinned trust roots — mirrors src/tenants.json. A wrong address here can't produce a false reading
 // because everything links back to the public ledger for you to confirm.
 const TENANTS = {
-  tvvin: {
+  'tvvin-sandbox': {
     network: 'testnet',
-    // tvvin-sandbox (Staging TVV). On-chain attestation publishing is off on staging, so the anchor
-    // account is the issuer itself; the live treasury read below is the figure that matters.
-    attestationAccount: 'rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34',
+    // Staging TVV. The attestation account SIGNS the daily attestation and issues nothing; the
+    // token issuer (below) issues TVV and signs nothing (THREE_SEPARATE_IDENTITIES in src/tenants.json).
+    attestationAccount: 'rL78qvWguiRiTjkwX4m8WfXaA84Te1ju2u',
     tokens: [
       { label: 'TVV-XRPL-Testnet', chain: 'xrpl', issuer: 'rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34', currency: 'TVV', decimals: 0 },
       { label: 'TVV-ETH-Sepolia', chain: 'ethereum', contract: '0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE', currency: 'GBP', decimals: 18 },

@@ -9,7 +9,10 @@
  *     the witness file's `tenantId` must equal it, which is what keeps
  *     two deployments that share a bank-service URL and signing key from
  *     being interchangeable. Falls back to tenantId when absent.
- *   - bankServiceUrl: the canonical bank-service base URL (HTTPS)
+ *   - bankServices[]: each bank-service deployment the tenant's seals may
+ *     come from, as { label, bankServiceUrl (HTTPS), kidPattern } (v0.7.1;
+ *     the older single bankServiceUrl + kidPattern is read as one entry).
+ *     A transaction is checked against the one whose kidPattern matches.
  *   - xrplPublishingAccount: the XRPL account the daily attestation tx
  *     MUST be signed by and sent from (defends Pro F2). This is the
  *     producer's per-tenant anchor wallet. It is NOT a token issuer and
@@ -58,6 +61,66 @@ let cached = null;
  *   - xrplPublishingAccount from its deprecated alias xrplIssuerAddress
  *   - bipcircleTenantId, defaulting to the pin name
  */
+/**
+ * v0.7.1 — the bank-service deployments a tenant's seals may come from.
+ *
+ * A tenant can move to a new bank-service deployment with its own signing
+ * key (tvvin-sandbox did on 2026-09-27). The new deployment's JWKS lists
+ * only the new key, so replacing the pin would make every attestation
+ * published before the move unverifiable. Instead the entry lists each
+ * deployment with its own kid pattern, and a transaction is checked against
+ * the ONE deployment whose pattern its signing key id matches.
+ *
+ * Accepts the legacy single `bankServiceUrl` + `kidPattern` as a one-entry
+ * list. An entry setting both forms is refused rather than merged. With
+ * more than one deployment every entry must carry a kid pattern, because
+ * the pattern is what selects the deployment.
+ */
+function normaliseBankServices(t) {
+  const hasList = t.bankServices !== undefined;
+  if (hasList && (t.bankServiceUrl !== undefined || t.kidPattern !== undefined)) {
+    throw new Error(
+      `tenantRegistry: tenant '${t.tenantId}' sets bankServices AND the single bankServiceUrl/kidPattern. `
+      + `Use one form; list every deployment under bankServices.`,
+    );
+  }
+  const raw = hasList ? t.bankServices : [{ bankServiceUrl: t.bankServiceUrl, kidPattern: t.kidPattern }];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`tenantRegistry: tenant '${t.tenantId}' bankServices must be a non-empty array`);
+  }
+  const seen = new Set();
+  return raw.map((s, i) => {
+    const where = `tenant '${t.tenantId}' bankServices[${i}]`;
+    if (!s || typeof s.bankServiceUrl !== 'string' || !s.bankServiceUrl.startsWith('https://')) {
+      throw new Error(`tenantRegistry: ${where} needs an https:// bankServiceUrl`);
+    }
+    if (seen.has(s.bankServiceUrl)) {
+      throw new Error(`tenantRegistry: ${where} repeats bankServiceUrl '${s.bankServiceUrl}'`);
+    }
+    seen.add(s.bankServiceUrl);
+    if (raw.length > 1 && (typeof s.kidPattern !== 'string' || s.kidPattern.length === 0)) {
+      throw new Error(`tenantRegistry: ${where} needs a kidPattern: with several deployments the pattern selects one`);
+    }
+    return Object.freeze({
+      label: s.label || s.bankServiceUrl,
+      bankServiceUrl: s.bankServiceUrl,
+      kidRegex: s.kidPattern ? new RegExp(s.kidPattern) : null,
+    });
+  });
+}
+
+/**
+ * The deployment a signing key id belongs to. Exactly one must match: none
+ * means the key is not pinned for this tenant, and more than one means the
+ * registry's patterns overlap, which is a registry defect, never a guess.
+ */
+export function selectBankService(bankServices, kid) {
+  if (bankServices.length === 1 && !bankServices[0].kidRegex) return { service: bankServices[0] };
+  const matches = bankServices.filter((s) => s.kidRegex && s.kidRegex.test(kid));
+  if (matches.length === 1) return { service: matches[0] };
+  return { service: null, matchCount: matches.length };
+}
+
 function normaliseTenant(t) {
   const normalisedTokens = Array.isArray(t.tokens)
     ? t.tokens
@@ -79,7 +142,7 @@ function normaliseTenant(t) {
 
   return {
     ...t,
-    _kidRegex: t.kidPattern ? new RegExp(t.kidPattern) : null,
+    bankServices: normaliseBankServices(t),
     tokens: normalisedTokens,
     xrplPublishingAccount: pub || alias || null,
     bipcircleTenantId: t.bipcircleTenantId || t.tenantId,

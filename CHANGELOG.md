@@ -2,10 +2,43 @@
 
 All notable changes to `@lazyjackorg/bipcircle-verifier`.
 
-> **Publishing state:** npm `latest` is **0.4.0**. Versions **0.5.0** and **0.6.0**
+> **Publishing state:** npm `latest` is **0.4.0** (0.7.0 was prepared but not published; 0.7.1 supersedes it). Versions **0.5.0** and **0.6.0**
 > were developed, committed and tagged nowhere — they exist in git history but were
 > never published, so no third party has ever run them. 0.7.0 is therefore the first
 > release to carry the 0.5.0 and 0.6.0 work, and the notes for all three are below.
+
+## [0.7.1] — 2026-09-30
+
+**A tenant can be pinned to more than one bank-service deployment, and `tvvin-sandbox` now is.**
+
+On 2026-09-27 BIPCircle staging moved `tvvin-sandbox` from the shared `bank-service-tvvin`
+(signing key `tvvin-signer`) to its own `bank-service-tvvin-sandbox` (signing key
+`tvvin-sandbox-signer`). 0.7.0 still pinned only the old deployment, so every attestation
+signed after the move failed `MEMO_KID_MISMATCH`, even though it was genuine. Each
+deployment's JWKS lists only its own key, so replacing the pin would have made every
+attestation signed before the move fail instead.
+
+- `src/tenants.json` schema **v5**: `bankServices[]`, one entry per deployment, each with its
+  own `bankServiceUrl` and `kidPattern`. The single `bankServiceUrl` + `kidPattern` form is
+  still read as a one-entry list; an entry using both forms is refused at load.
+- A transaction is checked against the ONE deployment whose `kidPattern` matches the key
+  Memo 5 names; the JWKS is fetched from that deployment only. With no key in Memo 5, every
+  witness seal must name a key of the same pinned deployment. New failures:
+  `REGISTRY_KID_AMBIGUOUS` (patterns overlap: a registry defect, never a guess) and
+  `SEAL_KID_UNPINNED`.
+- The loader refuses a list with a repeated URL, a non-https URL, or (with several
+  deployments) an entry without a `kidPattern`.
+- `tvvin-sandbox` pins both deployments, new first. Attestations from before and after the
+  move both verify.
+- The web verifier (`docs/index.html`) now names the pin `tvvin-sandbox` and reads the real
+  publishing account `rL78qvWguiRiTjkwX4m8WfXaA84Te1ju2u`; it pinned the token issuer.
+- Tests: `test/bankServices.test.js` (two deployments, two keys, each JWKS serving only its
+  own). Mutation-checked: always picking the first deployment, dropping the seal-agreement
+  check, restoring the old single pin, or accepting both forms each fails a test.
+
+Staging note: attestations for the GBP cell currently publish `over_reserved` (bank reserves
+above supply), so they verify as INCONCLUSIVE with every check passing, not PASS. That is the
+producer's published verdict, not a verifier fault.
 
 ## [0.7.0] — 2026-09-20
 

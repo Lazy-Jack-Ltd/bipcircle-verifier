@@ -42,13 +42,15 @@ Drop `--eth-rpc-url` and pass `--skip-onchain` to run the integrity stages witho
 
 ## Pinned tenants in this build
 
-Run `bipcircle-verify --help` to see the live list. As of this README (matching `src/tenants.json`, schema v4, 2026-09-20):
+Run `bipcircle-verify --help` to see the live list. As of this README (matching `src/tenants.json`, schema v5, 2026-09-30):
 
 - **`tvvin-sandbox`** — testnet/Sepolia stablecoin issuer, one pinned GBP cell
   - **XRPL publishing account** (signs the attestation tx, testnet): `rL78qvWguiRiTjkwX4m8WfXaA84Te1ju2u`
   - **XRPL token issuer** (its obligations are the on-ledger supply): `rD1ggC6jCbHD8cK9YFs3rCmQNE8abABt34`
   - **Ethereum (Sepolia) token contract**: `0x9E7889eA511838e6Ac526988fb3a7c7A3B6dd2EE`
-  - Bank-service URL: `https://bank-service-tvvin-yrikeqyelq-nw.a.run.app`
+  - Bank-service deployments (a transaction is checked against the one whose signing key it names):
+    - `https://bank-service-tvvin-sandbox-yrikeqyelq-nw.a.run.app`, key `…/cryptoKeys/tvvin-sandbox-signer/…`, attestations from 2026-09-27
+    - `https://bank-service-tvvin-yrikeqyelq-nw.a.run.app`, key `…/cryptoKeys/tvvin-signer/…`, attestations before 2026-09-27
   - BIPCircle platform tenant (must match the witness): `tvvin-sandbox`
 
 > **Those first three are three different things.** The publishing account signs the attestation and issues nothing. The token issuer issues TVV and signs nothing. The contract is an EVM address and is neither. Through v0.6.0 the registry pinned the *token issuer* as the account attestations must come from, so every genuine attestation failed the account check — see `THREE_SEPARATE_IDENTITIES` in `src/tenants.json` before editing any of them.

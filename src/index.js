@@ -5,7 +5,7 @@
  *
  *   1. REGISTERED-TENANT mode (preferred): pass `tenantId` whose entry
  *      lives in src/tenants.json. The verifier loads the pinned
- *      bankServiceUrl + xrplIssuerAddress + kidPattern + token config
+ *      bankServices (URL + kidPattern per deployment) + publishing account + token config
  *      from the registry. Trust roots come from the verifier source
  *      release, NOT user input — this closes Pro audit F1+F2 (user-
  *      supplied URL / TX-from-any-account spoofing).
@@ -52,7 +52,7 @@ import { fetchAndValidateWitness } from './witness.js';
 import { fetchJwks } from './keys.js';
 import { verifySealSignatures } from './sigverify.js';
 import { computeMerkleRootForVersion } from './merkle.js';
-import { lookupTenant } from './tenantRegistry.js';
+import { lookupTenant, selectBankService } from './tenantRegistry.js';
 import {
   parseCanonicalRecord,
   bindRecordToCell,
@@ -119,7 +119,9 @@ export async function verify({
       return result;
     }
     trustRoots = {
-      bankServiceUrl: t.bankServiceUrl,
+      // v0.7.1 — every bank-service deployment pinned for this tenant, each
+      // with its own kid pattern. One is selected per transaction below.
+      bankServices: t.bankServices,
       // v0.7.0 — the account the attestation tx must be SIGNED BY. Formerly
       // (mis)named xrplIssuerAddress; the registry loader resolves the alias.
       // This is NOT the token issuer — that lives on tokens[].issuer and is
@@ -127,7 +129,6 @@ export async function verify({
       xrplPublishingAccount: t.xrplPublishingAccount,
       // v0.7.0 — the BIPCircle platform tenant id the witness must name.
       bipcircleTenantId: t.bipcircleTenantId,
-      kidRegex: t._kidRegex,
       // v2 registry shape: tokens[] (multi-chain). tenantRegistry.js
       // back-compat-maps the old single `token` to a 1-element array
       // so reads here always see an array.
@@ -153,6 +154,7 @@ export async function verify({
       bipcircleTenantId: trustRoots.bipcircleTenantId,
       source: 'pinned',
       tokenCount: trustRoots.tokens.length,
+      bankServiceCount: trustRoots.bankServices.length,
     };
   } else {
     if (!unsafeBankServiceUrl || !unsafeIssuer) {
@@ -164,14 +166,13 @@ export async function verify({
       return result;
     }
     trustRoots = {
-      bankServiceUrl: unsafeBankServiceUrl,
+      bankServices: [{ label: 'unsafe-override', bankServiceUrl: unsafeBankServiceUrl, kidRegex: null }],
       xrplPublishingAccount: unsafeIssuer,
       // No pinned platform tenant id in override mode, so the witness-tenant
       // binding below cannot run. tokens[] is empty by construction, so the
       // supply stage never runs either and the verdict is capped at
       // INCONCLUSIVE — an override can never reach PASS.
       bipcircleTenantId: null,
-      kidRegex: null,
       tokens: [],
     };
     result.mode = 'unsafe-override';
@@ -209,13 +210,25 @@ export async function verify({
     result.verdict = 'FAIL';
     return result;
   }
-  if (trustRoots.kidRegex && memo.bankServicePublicKeyId && !trustRoots.kidRegex.test(memo.bankServicePublicKeyId)) {
-    result.failures.push({
-      stage: 'xrpl',
-      reason: `MEMO_KID_MISMATCH: Memo 5 references bankServicePublicKeyId='${memo.bankServicePublicKeyId}' which does not match the tenant's pinned kidPattern. Possible attacker-controlled tx.`,
-    });
-    result.verdict = 'FAIL';
-    return result;
+  // v0.7.1 — pick the bank-service deployment by the signing key Memo 5
+  // names. With no key named, a single pinned deployment is used and several
+  // are resolved from the witness seals after Stage 2.
+  let bankService = null;
+  if (memo.bankServicePublicKeyId) {
+    const pick = selectBankService(trustRoots.bankServices, memo.bankServicePublicKeyId);
+    if (!pick.service) {
+      result.failures.push({
+        stage: 'xrpl',
+        reason: pick.matchCount > 1
+          ? `REGISTRY_KID_AMBIGUOUS: Memo 5 key '${memo.bankServicePublicKeyId}' matches ${pick.matchCount} pinned bank-service deployments for this tenant. This is a defect in the verifier's own registry, not evidence about the transaction.`
+          : `MEMO_KID_MISMATCH: Memo 5 references bankServicePublicKeyId='${memo.bankServicePublicKeyId}' which does not match the kidPattern of any bank-service deployment pinned for this tenant. Possible attacker-controlled tx.`,
+      });
+      result.verdict = 'FAIL';
+      return result;
+    }
+    bankService = pick.service;
+  } else if (trustRoots.bankServices.length === 1) {
+    bankService = trustRoots.bankServices[0];
   }
 
   // Stage 1b (v0.6.0 — 2026-07-29 cell audit, finding 12): consume Memo 1,
@@ -340,13 +353,32 @@ export async function verify({
     });
   }
 
+  // v0.7.1 — no key named in Memo 5 and several deployments pinned: every
+  // seal must name a key of ONE pinned deployment.
+  if (!bankService) {
+    const picks = new Set();
+    for (const seal of witness.seals || []) {
+      const pick = selectBankService(trustRoots.bankServices, seal.publicKeyId);
+      picks.add(pick.service);
+    }
+    if (picks.size !== 1 || picks.has(null)) {
+      result.failures.push({
+        stage: 'jwks',
+        reason: 'SEAL_KID_UNPINNED: Memo 5 names no signing key and the witness seals do not all belong to one bank-service deployment pinned for this tenant.',
+      });
+      result.verdict = 'FAIL';
+      return result;
+    }
+    [bankService] = picks;
+  }
+
   // Stage 3: JWKS + kid pattern binding
   let jwksByKid;
   try {
-    jwksByKid = await fetchJwks({ bankServiceUrl: trustRoots.bankServiceUrl, fetchImpl });
-    if (trustRoots.kidRegex) {
+    jwksByKid = await fetchJwks({ bankServiceUrl: bankService.bankServiceUrl, fetchImpl });
+    if (bankService.kidRegex) {
       for (const kid of jwksByKid.keys()) {
-        if (!trustRoots.kidRegex.test(kid)) {
+        if (!bankService.kidRegex.test(kid)) {
           throw new Error(
             `JWKS_KID_PATTERN_MISMATCH: JWKS advertised kid '${kid}' that does not match the tenant's pinned pattern. ` +
             `Refusing to trust this JWKS — possible attacker-controlled bank-service URL.`,
@@ -354,7 +386,13 @@ export async function verify({
         }
       }
     }
-    result.stages.jwks = { ok: true, keyCount: jwksByKid.size, kids: [...jwksByKid.keys()] };
+    result.stages.jwks = {
+      ok: true,
+      bankService: bankService.label,
+      bankServiceUrl: bankService.bankServiceUrl,
+      keyCount: jwksByKid.size,
+      kids: [...jwksByKid.keys()],
+    };
   } catch (err) {
     result.failures.push({ stage: 'jwks', reason: err.message });
     result.verdict = 'FAIL';
