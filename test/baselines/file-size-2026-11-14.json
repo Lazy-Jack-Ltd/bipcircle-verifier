@@ -1,0 +1,17 @@
+{
+  "_note": "File size ratchet baseline, 14 Nov 2026. Every tracked source file over 400 lines is listed at its measured size (content.split('\\n').length). A ceiling may only fall: when a file shrinks, re-pin it down here (or delete the entry once it is 400 lines or fewer) and lower the totals in the ratchet test. Never raise a maxLoc. Roots and thresholds are in file-size-config.json.",
+  "grandfathered": {
+    "src/index.js": {
+      "grandfathered": true,
+      "maxLoc": 711,
+      "measuredAt": "2026-11-14",
+      "reason": "GRANDFATHERED at 711 lines"
+    },
+    "test/registryIdentity.test.js": {
+      "grandfathered": true,
+      "maxLoc": 420,
+      "measuredAt": "2026-11-14",
+      "reason": "GRANDFATHERED at 420 lines"
+    }
+  }
+}

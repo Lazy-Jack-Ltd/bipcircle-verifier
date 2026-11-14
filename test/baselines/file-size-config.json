@@ -1,0 +1,9 @@
+{
+  "_note": "Config for the file size ratchet (14 Nov 2026). Which tracked files count as source, and the two line thresholds. A root ends in a slash and a star stands for one path segment. Tests are counted. Lock files, generated output, vendored trees and node_modules are excluded. Change a value here, never in the test. The counts and the total pinned cap are constants in the test file, where a raise is a loud edit; the per-file ceilings are in file-size-2026-11-14.json.",
+  "warnLoc": 400,
+  "hardLoc": 800,
+  "sourceRoots": ["src/", "test/", "bin/"],
+  "extensions": ["js", "mjs", "cjs", "ts", "tsx"],
+  "excludedDirNames": ["node_modules", "dist", "build", "vendor", "vendored", "generated", "coverage"],
+  "excludedFilePattern": "(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml)$|\\.generated\\.|\\.min\\."
+}
