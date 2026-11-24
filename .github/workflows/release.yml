@@ -77,7 +77,7 @@ jobs:
             ### Install
 
             ```bash
-            npm install -g @lazy-jack/bipcircle-verifier
+            npm install -g @lazyjackorg/bipcircle-verifier
             ```
 
             ### Use
